@@ -725,7 +725,12 @@
             "showReCord": true
         },
         "GoLiveBypass": {
-            "enabled": true
+            "enabled": true,
+            "onboardingCompleted": false,
+            "onboardingSkipped": true,
+            "autoUpdate": false,
+            "protonFreeOnly": true,
+            "protonAutoPing": true
         },
         "GoogleThat": {
             "enabled": false,
