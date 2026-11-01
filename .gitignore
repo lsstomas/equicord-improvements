@@ -1,0 +1,6 @@
+# Private data must never reach this public repository.
+*.private.json
+equicord-all-backup*.json
+*.jsonl
+*.log
+node_modules/
