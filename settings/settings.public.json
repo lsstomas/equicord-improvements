@@ -639,7 +639,7 @@
             "enabled": true
         },
         "FrequentQuickSwitcher": {
-            "enabled": true
+            "enabled": false
         },
         "FriendCloud": {
             "enabled": false
@@ -1722,7 +1722,7 @@
             "enabled": false
         },
         "VCPanelSettings": {
-            "enabled": true,
+            "enabled": false,
             "uncollapseSettingsByDefault": false,
             "outputVolume": true,
             "inputVolume": true,
