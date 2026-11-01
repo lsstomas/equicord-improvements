@@ -1,0 +1,23 @@
+.vc-last-message-date-section {
+    color: var(--text-default, var(--text-normal));
+    font-size: 14px;
+}
+
+.vc-last-message-date-title {
+    margin-bottom: 4px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.vc-last-message-date-button {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--text-link);
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.vc-last-message-date-button:hover {
+    text-decoration: underline;
+}

@@ -1,0 +1,52 @@
+diff --git a/a/index.tsx b/b/index.tsx
+index b77e97e..5d4596a 100644
+--- a/a/index.tsx
++++ b/b/index.tsx
+@@ -1,5 +1,6 @@
+ import definePlugin, { OptionType } from "@utils/types";
+ import { definePluginSettings } from "@api/Settings";
++import ErrorBoundary from "@components/ErrorBoundary";
+ import { DataStore } from "@api/index";
+ import { ConfirmModal, openModal, React, ReactDOM } from "@webpack/common";
+ import { findByPropsLazy } from "@webpack";
+@@ -204,13 +205,39 @@ function BelowNameText({ userId }: { userId: string; }) {
+     );
+ }
+ 
++const ProfileLastOnline = ErrorBoundary.wrap(({ userId }: { userId: string; }) => {
++    const [, tick] = React.useReducer(n => n + 1, 0);
++
++    React.useEffect(() => {
++        const timer = setInterval(tick, 30_000);
++        return () => clearInterval(timer);
++    }, []);
++
++    const ts = lastSeen.get(userId);
++    let text = "Not seen online yet";
++    if (!isOffline(userId)) text = "Online now";
++    else if (ts !== undefined) text = `${ago(Date.now() - ts)} · ${new Date(ts).toLocaleString()}`;
++
++    return (
++        <div style={{ color: "var(--text-default, var(--text-normal))", fontSize: "14px" }}>
++            <div style={{ marginBottom: "4px", fontSize: "12px", fontWeight: 500 }}>Last online</div>
++            <div>{text}</div>
++        </div>
++    );
++}, { noop: true });
++
+ export default definePlugin({
+     name: "LastOnlineTracker",
+     description: "shows 'Active X ago' under usernames in the DM list.",
+     authors: [{ name: "k1ng_op", id: 641266820187160576n }],
+-    dependencies: ["MemberListDecoratorsAPI"],
++    dependencies: ["MemberListDecoratorsAPI", "ProfileSectionsAPI"],
+     settings,
+ 
++    renderProfileSection: {
++        render: ProfileLastOnline,
++        priority: 0
++    },
++
+     flux: {
+         PRESENCE_UPDATES({ updates }: { updates?: Array<{ user: { id: string }; status: string; clientStatus?: Record<string, string>; }>; }) {
+             if (!updates) return;
