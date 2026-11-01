@@ -31,6 +31,7 @@ export interface PanelStatus {
     state: string;
     active: boolean;
     requiresRelaunch?: boolean;
+    appsOutdated?: boolean;
     sessionStorage?: string;
     externalReason: string | null;
     dependencies?: string[];
@@ -83,6 +84,7 @@ export interface ControlPanelController {
     refresh(): Promise<void>;
     activate(): void;
     deactivate(): void;
+    reconnect(): void;
     restartClient(): void;
     restoreNetwork(): void;
     testConfig(): void;
@@ -106,9 +108,9 @@ const BUSY_TITLES: Record<string, string> = {
     restart_pending: "Restart Discord to finish",
 };
 
-export function panelTone(status: Pick<PanelStatus, "state" | "active" | "requiresRelaunch"> | null): PanelTone {
+export function panelTone(status: Pick<PanelStatus, "state" | "active" | "requiresRelaunch" | "appsOutdated"> | null): PanelTone {
     if (!status) return "off";
-    if (status.requiresRelaunch) return "alert";
+    if (status.requiresRelaunch || status.appsOutdated) return "alert";
     if (status.active || status.state === "active") return "on";
     if (status.state in BUSY_TITLES) return "busy";
     if (status.state === "blocked_external" || status.state === "dependency_missing" || status.state === "recovery_required") return "alert";
@@ -176,6 +178,7 @@ function heroCopy(controller: ControlPanelController, tone: PanelTone) {
     const route = formatVpnRouteSummary(status?.route ?? null);
 
     if (!status) return { title: "Checking…", detail: "Reading the tunnel state." };
+    if (status.appsOutdated) return { title: "Discord was updated", detail: "The tunnel still points to the old version, so Discord is outside it. Reconnect to fix this." };
     if (status.requiresRelaunch) return { title: "Restart Discord", detail: "The tunnel is ready, but this Discord is still outside it." };
     if (tone === "on") return { title: "Bypass is on", detail: route ? `Connected through ${route}` : "Discord is going through the tunnel." };
     if (tone === "busy") return { title: BUSY_TITLES[status.state], detail: route ? `Route ${route}` : "One moment." };
@@ -193,6 +196,7 @@ function PrimaryAction({ controller, openTab }: { controller: ControlPanelContro
     const className = "vc-glb-cta";
 
     if (!status) return <Button className={className} disabled>Checking…</Button>;
+    if (status.appsOutdated) return <Button className={className} onClick={controller.reconnect} disabled={locked}>{busy ? "Reconnecting…" : "Reconnect bypass"}</Button>;
     if (status.active) return <Button className={className} variant="dangerSecondary" onClick={controller.deactivate} disabled={locked}>{busy ? "Turning off…" : "Turn off bypass"}</Button>;
     if (status.requiresRelaunch || status.state === "restart_pending") return <Button className={className} onClick={controller.restartClient} disabled={locked}>Restart Discord</Button>;
     if (status.state === "recovery_required") return <Button className={className} variant="dangerPrimary" onClick={controller.restoreNetwork} disabled={locked}>Restore network</Button>;
@@ -210,7 +214,7 @@ function Hero({ controller, openTab }: { controller: ControlPanelController; ope
     const tone = panelTone(controller.status);
     const { title, detail } = heroCopy(controller, tone);
     const hint = controller.status?.active
-        ? "Only Discord goes through the tunnel. Turning it off doesn't close Discord; it just reconnects."
+        ? "Only Discord goes through the tunnel. It stays on after you close Discord or restart your PC, until you turn it off here."
         : "Turning it on restarts Discord and leaves your call. Windows asks for permission the first time.";
 
     return (

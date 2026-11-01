@@ -921,12 +921,12 @@ try {
   $service=Get-Service -Name $name -ErrorAction SilentlyContinue
   if($service -and $service.Status -ne 'Stopped') { Stop-Service -Name $name -Force; $service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(20)) }
   if(-not $service) {
-    & ${quotePowerShell(executable)} install -start-type 3 -config ${quotePowerShell(configPath)} -log-level info -network-lock disabled
+    & ${quotePowerShell(executable)} install -start-type 2 -config ${quotePowerShell(configPath)} -log-level info -network-lock disabled
     if($LASTEXITCODE -ne 0){ throw 'Falha ao instalar o serviço WireSock' }
   }
   $info=Get-CimInstance Win32_Service -Filter "Name='$name'"
   if(-not $info){ throw 'Serviço WireSock não encontrado após instalação' }
-  $change=Invoke-CimMethod -InputObject $info -MethodName Change -Arguments @{PathName=$expected;StartMode='Manual'}
+  $change=Invoke-CimMethod -InputObject $info -MethodName Change -Arguments @{PathName=$expected;StartMode='Automatic'}
   if($change.ReturnValue -ne 0){ throw "Falha ao atualizar o perfil do serviço: $($change.ReturnValue)" }
   $actual=Get-CimInstance Win32_Service -Filter "Name='$name'"
   if($actual.PathName -cne $expected){ throw 'O serviço WireSock permaneceu com outra configuração' }
@@ -1012,6 +1012,13 @@ function runAsAdministrator(file: string, args: string[], log: WireSockLogger): 
     }
 }
 
+// O serviço inicia com o Windows para o bypass sobreviver ao reboot. Desligar precisa tirar
+// esse início automático também, e no mesmo comando para pedir uma elevação só.
+function stopServiceAndAutostart(name: string, log: WireSockLogger): boolean {
+    if (!/^[\w.-]+$/.test(name)) return runAsAdministrator("sc.exe", ["stop", name], log);
+    return runAsAdministrator("cmd.exe", ["/c", `sc.exe config ${name} start= demand & sc.exe stop ${name}`], log);
+}
+
 function killProcesses(processIds: number[], label: string, log: WireSockLogger): void {
     for (const pid of processIds) {
         if (!runAsAdministrator("taskkill.exe", ["/F", "/T", "/PID", String(pid)], log))
@@ -1081,7 +1088,7 @@ export async function stopOwnedWireSock(
         // Serviços listados são os que a leitura confirmou em execução; na ação
         // manual a parada segue mesmo sem o argumento de configuração legível.
         if (manual || containsConfig(serviceCommand(name), configPath)) {
-            if (!runAsAdministrator("sc.exe", ["stop", name], log))
+            if (!stopServiceAndAutostart(name, log))
                 log("warn", "não consegui solicitar parada do serviço WireSock", { servico: name, modo: manual ? "manual" : "proprio" });
         }
     }

@@ -114,6 +114,8 @@ export interface VpnStatus {
     sessionStorage?: ProtonSessionStorage;
     /** Rota do perfil ativo; null quando não há perfil gravado. */
     route?: VpnRouteInfo | null;
+    /** O túnel ativo aponta para outra versão do Discord, que ficou fora do filtro. */
+    appsOutdated?: boolean;
 }
 
 export type VpnOperationCode =
@@ -294,7 +296,7 @@ export function vpnRouteStateLabel(input: {
     optimizationNotice: string;
 }): string {
     if (input.optimizing) return "otimizando a rota automaticamente";
-    const status = input.status;
+    const { status } = input;
     if (!status) return input.optimizationNotice;
     if (status.active || status.state === "active") return "ativa";
     switch (status.state) {

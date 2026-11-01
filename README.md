@@ -47,6 +47,8 @@ GoLiveBypass runs on Windows x64 and Linux x64, and needs a ProtonVPN account or
 
 - Turning it on restarts Discord and leaves your call. Windows asks for permission the first time, to install WireSock.
 - Only Discord goes through the tunnel. Your browser and other apps stay on your normal network.
+- On Windows, it stays on after you close Discord or restart your computer, until you turn it off in the panel.
+- If the tunnel doesn't respond when Discord opens, a dialog offers to turn it off. After a Discord update, the panel asks you to reconnect.
 - Optimize turns the bypass off while it tests routes, so avoid it during a call.
 - On Windows with WSL's mirrored networking, installing the WireSock driver can cut WSL's network until you restart.
 

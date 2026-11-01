@@ -388,6 +388,7 @@ export class PluginVpnController {
     private restarting = false;
     private initialized = false;
     private automaticBootSuppressed = false;
+    private appsOutdated = false;
     private optimization: { id: string; controller: AbortController } | null = null;
     private protonLogin: { id: string; controller: AbortController } | null = null;
     private routeMeasurement: ProtonRouteMeasurement | null = null;
@@ -424,6 +425,34 @@ export class PluginVpnController {
 
     public shouldSkipAutomaticEnable(): boolean {
         return this.automaticBootSuppressed;
+    }
+
+    // No Windows o serviço filtra por aplicativo e não depende deste processo: mantê-lo ligado
+    // deixa o Discord nascer dentro do túnel na próxima abertura, sem UAC nem relaunch. No
+    // Linux a namespace pertence ao processo, então o fechamento continua limpando.
+    public shouldKeepTunnelOnQuit(): boolean {
+        return isWindows() && this.state === "active";
+    }
+
+    // O processo principal está no AllowedApps, então esta consulta passa pelo túnel. Roda fora
+    // do renderer porque um túnel morto pode impedir a interface do Discord de carregar.
+    public async tunnelResponds(): Promise<boolean> {
+        if (!isWindows() || this.state !== "active") return true;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 5_000));
+            if ((await windows.diagnoseWindowsNetwork(this.options.log)).httpsOk) return true;
+        }
+        return false;
+    }
+
+    // Uma atualização do Discord muda a pasta app-*: o serviço segue filtrando o caminho antigo.
+    private serviceTracksThisDiscord(): boolean {
+        try {
+            const config = fs.readFileSync(this.serviceConfigPath, "utf8").toLowerCase();
+            return config.includes(path.resolve(process.execPath).toLowerCase());
+        } catch {
+            return true;
+        }
     }
 
     public hasCleanupWork(): boolean {
@@ -535,6 +564,8 @@ export class PluginVpnController {
             if (adopted.probePath) await this.cleanupStaleProbes([adopted.probePath]);
             this.state = "active";
             this.discordPid = process.pid;
+            this.appsOutdated = !this.serviceTracksThisDiscord();
+            if (this.appsOutdated) this.options.log("warn", "túnel ativo aponta para outra versão do Discord; reconexão necessária");
             this.diagnosticGeneration++;
             this.startWatchdog();
             this.startDiagnostics("adoption");
@@ -798,6 +829,7 @@ export class PluginVpnController {
             lastDiagnostic: this.lastDiagnostic,
             message: reportedState === "inactive" ? "VPN inativa" : this.statusMessage(),
             route: this.readActiveRoute(),
+            appsOutdated: active && this.appsOutdated,
         };
     }
     public async getStatusAsync(): Promise<VpnStatus> {

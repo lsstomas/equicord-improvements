@@ -2813,6 +2813,10 @@ async function rebuildUserplugin(projectRoot: string): Promise<void> {
 app.on("before-quit", event => {
     if (controller.isRelaunching() || quitting) return;
     controller.cancelProtonLogin();
+    if (controller.shouldKeepTunnelOnQuit()) {
+        log("info", "Discord fechado com o bypass ligado; o túnel continua até o usuário desligar");
+        return;
+    }
     if (!controller.hasCleanupWork()) return;
     event.preventDefault();
     quitting = true;
@@ -2849,6 +2853,26 @@ app.on("will-quit", () => {
     disposeWireSockSnapshotWorker();
 });
 
+// Com o túnel persistente, uma rota morta pode impedir o Discord de carregar a interface, que é
+// onde fica o botão de desligar. O diálogo nativo não depende dela. Nunca desliga sozinho: sem
+// internet nenhuma o resultado seria igual, e a parada ainda pede permissão do Windows.
+async function offerToStopDeadTunnel(): Promise<void> {
+    if (await controller.tunnelResponds()) return;
+    log("warn", "túnel ativo não respondeu ao abrir o Discord");
+    const { response } = await dialog.showMessageBox({
+        type: "warning",
+        title: "GoLiveBypass",
+        message: "The bypass tunnel isn't responding",
+        detail: "Discord may not connect while it's on. Turn it off to use your normal connection, or keep it on if your internet is down.",
+        buttons: ["Turn off bypass", "Keep it on"],
+        defaultId: 0,
+        cancelId: 1,
+    });
+    if (response !== 0) return;
+    const result = await runLogOperation("vpn-shutdown", () => controller.shutdown(false));
+    if (!result.success) log("error", "não consegui desligar o túnel que não respondeu", { state: result.state, erro: result.error });
+}
+
 app.whenReady().then(async () => {
     log("info", `abrindo plugin VPN | ${process.platform} ${process.arch} | electron ${process.versions.electron}`);
     try {
@@ -2863,6 +2887,7 @@ app.whenReady().then(async () => {
     // antigo e aguarde o reload explícito.
     pluginRuntimeVersion = currentPluginVersion();
     await controller.initialize();
+    void offerToStopDeadTunnel().catch(error => log("error", "falha ao verificar o túnel na abertura", { erro: error }));
     if (pluginEnabled() && pluginSettings().onboardingCompleted === true) {
         if (controller.shouldSkipAutomaticEnable()) {
             log("warn", "VPN não foi ativada automaticamente após relaunch não confirmado");

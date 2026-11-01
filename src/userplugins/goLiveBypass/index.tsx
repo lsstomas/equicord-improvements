@@ -2123,6 +2123,7 @@ interface PluginVpnStatus {
     sessionStorage?: "safe-storage" | "file" | "memory-only";
     /** Rota do perfil ativo (o plugin novo envia; uma versão antiga do plugin deixa ausente). */
     route?: VpnRouteInfo | null;
+    appsOutdated?: boolean;
 }
 
 function useVpnPanelController(): ControlPanelController {
@@ -2424,6 +2425,10 @@ function useVpnPanelController(): ControlPanelController {
         refresh,
         activate: () => void call(() => Native!.enable()),
         deactivate: () => void call(() => Native!.shutdown(), "Bypass is off. Discord will reconnect on its own."),
+        reconnect: () => void call(async () => {
+            const stopped = await Native!.shutdown();
+            return stopped.success === false ? stopped : Native!.enable();
+        }),
         restartClient: () => void call(() => (typeof Native?.restartDiscord === "function" ? Native.restartDiscord() : Native!.enable()), "Restarting Discord…"),
         restoreNetwork: () => void call(() => Native!.restoreNetwork(), "Network restored."),
         testConfig: () => void call(() => Native!.testWireGuardConfig(customConfigPath), "File tested."),
