@@ -12,6 +12,7 @@ Built and tested against Equicord 1.15.15.0, commit `00abcbeea`.
 | **VoiceChannelLog** | [Equicord](https://github.com/Equicord/Equicord), modified | Saved history of the calls you were in, with filters, search and export |
 | **ToastNotifications** | [Equicord](https://github.com/Equicord/Equicord), modified | Adds a toast when someone on your list joins a call |
 | **FakeDeafen** | [fakedeafen](https://github.com/itskonv1/fakedeafen), modified | Shows you as muted and deafened while you keep hearing |
+| **GoLiveBypass** | [GoLiveBypass](https://github.com/bezumiya/GoLiveBypass), modified | Brings back Go Live and camera in Brazil through a WireGuard tunnel for Discord only, with a control panel in the top bar |
 | **FakeMedia** | Original | Shows a camera or screen share without sending anything |
 | **VoiceFakeDetector** | [Endcord](https://github.com/Endcord/Endcord), adapted | Marks people shown as muted who are still sending audio |
 | **ClientModDetector** | Original | Marks people who left visible traces of a modified client |
@@ -40,6 +41,17 @@ To install with an AI agent, give it this:
 
 > Follow AGENTS.md in https://github.com/lsstomas/equicord-improvements to install these plugins.
 
+## GoLiveBypass
+
+GoLiveBypass runs on Windows x64 and Linux x64, and needs a ProtonVPN account or your own WireGuard `.conf` file. Open it from the shield icon in Discord's top bar.
+
+- Turning it on restarts Discord and leaves your call. Windows asks for permission the first time, to install WireSock.
+- Only Discord goes through the tunnel. Your browser and other apps stay on your normal network.
+- Optimize turns the bypass off while it tests routes, so avoid it during a call.
+- On Windows with WSL's mirrored networking, installing the WireSock driver can cut WSL's network until you restart.
+
+Auto-update stays off, because an update would replace the control panel.
+
 ## Layout
 
 ```
@@ -57,6 +69,8 @@ AGENTS.md   Install guide for AI agents
 `src/equicordplugins` replaces two of Equicord's own plugins. If Equicord has changed them since the commit above, those changes are overwritten.
 
 `LastOnlineTracker` has no license file, so only my change is stored here. The installer downloads the author's original and applies the patch.
+
+GoLiveBypass's Proton helper is a 14 MB prebuilt file, so it isn't stored here either. On Windows, the installer downloads it from the author's release and checks its SHA-256.
 
 ## Privacy
 

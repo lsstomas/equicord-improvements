@@ -1,0 +1,516 @@
+.vc-glb-panel {
+    --glb-text: var(--text-default, var(--text-normal, #dbdee1));
+    --glb-strong: var(--text-strong, var(--header-primary, #f2f3f5));
+    --glb-muted: var(--text-muted, #949ba4);
+    --glb-line: var(--border-subtle, rgb(255 255 255 / 8%));
+    --glb-surface: rgb(255 255 255 / 3%);
+    --glb-hover: var(--background-modifier-hover, rgb(255 255 255 / 6%));
+    --glb-on: var(--status-positive, #23a55a);
+    --glb-warn: var(--status-warning, #f0b232);
+    --glb-danger: var(--status-danger, #f23f43);
+    --glb-brand: var(--brand-500, #5865f2);
+    --glb-focus: var(--focus-primary, #00a8fc);
+
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-width: 0;
+    max-height: min(70vh, 640px);
+    padding-right: 6px;
+    overflow: hidden auto;
+    color: var(--glb-text);
+    font-size: 14px;
+    line-height: 1.45;
+    scrollbar-color: var(--scrollbar-thin-thumb, rgb(255 255 255 / 15%)) transparent;
+    scrollbar-width: thin;
+}
+
+.vc-glb-panel h2,
+.vc-glb-panel h3,
+.vc-glb-panel h4,
+.vc-glb-panel p,
+.vc-glb-panel ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.vc-glb-panel :is(button, input):focus-visible {
+    outline: 2px solid var(--glb-focus);
+    outline-offset: -2px;
+}
+
+/* Ícone do topo: herda a cor do botão e só o ponto carrega o estado. */
+.vc-glb-icon-dot {
+    fill: var(--status-positive, #23a55a);
+    stroke: var(--background-base-low, var(--background-primary, #1e1f22));
+    stroke-width: 1.5;
+}
+
+.vc-glb-icon-busy .vc-glb-icon-dot {
+    fill: var(--status-warning, #f0b232);
+}
+
+.vc-glb-icon-alert .vc-glb-icon-dot {
+    fill: var(--status-danger, #f23f43);
+}
+
+.vc-glb-hero {
+    --glb-tone: var(--glb-muted);
+
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+    border: 1px solid var(--glb-line);
+    border-radius: 12px;
+    background: var(--glb-surface);
+}
+
+.vc-glb-hero-on { --glb-tone: var(--glb-on); }
+.vc-glb-hero-busy { --glb-tone: var(--glb-warn); }
+.vc-glb-hero-alert { --glb-tone: var(--glb-danger); }
+
+.vc-glb-hero-status {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    min-width: 0;
+}
+
+.vc-glb-orb {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--glb-tone) 16%, transparent);
+    color: var(--glb-tone);
+}
+
+.vc-glb-hero-busy .vc-glb-orb {
+    animation: vc-glb-pulse 1.4s ease-in-out infinite;
+}
+
+.vc-glb-orb .vc-glb-icon-dot {
+    display: none;
+}
+
+.vc-glb-hero-copy {
+    min-width: 0;
+}
+
+.vc-glb-hero-copy h2 {
+    color: var(--glb-strong);
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.vc-glb-hero-copy p {
+    margin-top: 2px;
+    overflow: hidden;
+    color: var(--glb-muted);
+    text-overflow: ellipsis;
+}
+
+.vc-glb-cta {
+    width: 100%;
+    min-height: 40px;
+    font-weight: 600;
+}
+
+.vc-glb-hint {
+    color: var(--glb-muted);
+    font-size: 12px;
+}
+
+.vc-glb-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+.vc-glb-section-head {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.vc-glb-section-head h3 {
+    color: var(--glb-strong);
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.vc-glb-checks {
+    border: 1px solid var(--glb-line);
+    border-radius: 8px;
+}
+
+.vc-glb-check {
+    display: grid;
+    grid-template-columns: 20px 112px minmax(0, 1fr);
+    gap: 8px;
+    align-items: center;
+    padding: 8px 12px;
+}
+
+.vc-glb-check + .vc-glb-check {
+    border-top: 1px solid var(--glb-line);
+}
+
+.vc-glb-check-glyph {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+}
+
+.vc-glb-check-ok {
+    background: color-mix(in srgb, var(--glb-on) 18%, transparent);
+    color: var(--glb-on);
+}
+
+.vc-glb-check-warn {
+    background: color-mix(in srgb, var(--glb-warn) 18%, transparent);
+    color: var(--glb-warn);
+}
+
+.vc-glb-check-idle {
+    background: var(--glb-hover);
+    color: var(--glb-muted);
+}
+
+.vc-glb-check-label {
+    color: var(--glb-strong);
+    font-weight: 500;
+}
+
+.vc-glb-check-value {
+    overflow: hidden;
+    color: var(--glb-muted);
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vc-glb-tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--glb-line);
+}
+
+.vc-glb-tabs button {
+    margin-bottom: -1px;
+    padding: 8px 12px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: none;
+    color: var(--glb-muted);
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.vc-glb-tabs button:hover {
+    color: var(--glb-text);
+}
+
+.vc-glb-tabs button[aria-selected="true"] {
+    border-bottom-color: var(--glb-brand);
+    color: var(--glb-strong);
+}
+
+.vc-glb-tabpanel {
+    padding-top: 4px;
+}
+
+.vc-glb-stack,
+.vc-glb-group {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+}
+
+.vc-glb-group {
+    gap: 8px;
+}
+
+.vc-glb-group + .vc-glb-group {
+    padding-top: 12px;
+    border-top: 1px solid var(--glb-line);
+}
+
+.vc-glb-group h4 {
+    color: var(--glb-strong);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.vc-glb-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.vc-glb-auto,
+.vc-glb-account {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px;
+    border-radius: 8px;
+    background: var(--glb-surface);
+}
+
+.vc-glb-auto strong,
+.vc-glb-account strong {
+    color: var(--glb-strong);
+}
+
+.vc-glb-auto p,
+.vc-glb-account p {
+    color: var(--glb-muted);
+    font-size: 12px;
+}
+
+/* E-mail fica desfocado por padrão: esse painel aparece em compartilhamento de tela. */
+.vc-glb-blur {
+    filter: blur(5px);
+    transition: filter 120ms ease;
+}
+
+.vc-glb-blur:hover {
+    filter: none;
+}
+
+.vc-glb-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    color: var(--glb-muted);
+    font-size: 12px;
+}
+
+.vc-glb-progress-bar {
+    position: relative;
+    display: block;
+    height: 4px;
+    overflow: hidden;
+    border-radius: 2px;
+    background: var(--glb-hover);
+}
+
+.vc-glb-progress-bar::after {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 40%;
+    border-radius: 2px;
+    background: var(--glb-brand);
+    content: "";
+    animation: vc-glb-slide 1.3s ease-in-out infinite;
+}
+
+.vc-glb-error {
+    color: var(--glb-danger);
+}
+
+.vc-glb-routes {
+    max-height: 244px;
+    overflow: hidden auto;
+    border: 1px solid var(--glb-line);
+    border-radius: 8px;
+    scrollbar-color: var(--scrollbar-thin-thumb, rgb(255 255 255 / 15%)) transparent;
+    scrollbar-width: thin;
+}
+
+.vc-glb-route {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 56px 76px;
+    gap: 8px;
+    align-items: center;
+    min-height: 48px;
+    padding: 6px 12px;
+}
+
+.vc-glb-route + .vc-glb-route {
+    border-top: 1px solid var(--glb-line);
+}
+
+.vc-glb-route:hover {
+    background: var(--glb-hover);
+}
+
+.vc-glb-route-main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.vc-glb-route-name {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    color: var(--glb-strong);
+    font-weight: 500;
+}
+
+.vc-glb-route-meta {
+    overflow: hidden;
+    color: var(--glb-muted);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vc-glb-route-ping {
+    color: var(--glb-muted);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+.vc-glb-route > button {
+    justify-self: end;
+}
+
+.vc-glb-tag {
+    padding: 0 6px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--glb-brand) 22%, transparent);
+    color: var(--glb-strong);
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 18px;
+    white-space: nowrap;
+}
+
+.vc-glb-tag-on {
+    justify-self: end;
+    background: color-mix(in srgb, var(--glb-on) 20%, transparent);
+}
+
+.vc-glb-routes-foot {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--glb-muted);
+    font-size: 12px;
+}
+
+.vc-glb-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    color: var(--glb-muted);
+    font-size: 12px;
+}
+
+.vc-glb-toggles {
+    border: 1px solid var(--glb-line);
+    border-radius: 8px;
+}
+
+.vc-glb-toggle {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 40px;
+    padding: 4px 12px;
+    color: var(--glb-strong);
+}
+
+.vc-glb-toggle + .vc-glb-toggle {
+    border-top: 1px solid var(--glb-line);
+}
+
+.vc-glb-update {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px;
+    border-radius: 8px;
+    background: var(--glb-surface);
+}
+
+.vc-glb-update-copy {
+    min-width: 0;
+}
+
+.vc-glb-update-copy strong {
+    color: var(--glb-strong);
+    font-weight: 600;
+}
+
+.vc-glb-update-copy p {
+    color: var(--glb-muted);
+    font-size: 12px;
+}
+
+.vc-glb-update .vc-glb-row {
+    flex: none;
+}
+
+.vc-glb-segment {
+    display: inline-flex;
+    gap: 2px;
+    align-self: flex-start;
+    padding: 2px;
+    border-radius: 8px;
+    background: var(--glb-surface);
+}
+
+.vc-glb-segment button {
+    padding: 6px 12px;
+    border: 0;
+    border-radius: 6px;
+    background: none;
+    color: var(--glb-muted);
+    font: inherit;
+    cursor: pointer;
+}
+
+.vc-glb-segment button[aria-checked="true"] {
+    background: var(--glb-hover);
+    color: var(--glb-strong);
+}
+
+.vc-glb-segment button:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+@keyframes vc-glb-pulse {
+    50% { opacity: 0.55; }
+}
+
+@keyframes vc-glb-slide {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(250%); }
+}
+
+/* Movimento reduzido: congela a animação e mantém o elemento visível. */
+@media (prefers-reduced-motion: reduce) {
+    .vc-glb-hero-busy .vc-glb-orb,
+    .vc-glb-progress-bar::after {
+        animation: none;
+    }
+
+    .vc-glb-progress-bar::after {
+        width: 100%;
+        opacity: 0.6;
+    }
+
+    .vc-glb-blur {
+        transition: none;
+    }
+}

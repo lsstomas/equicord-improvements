@@ -16,7 +16,7 @@ const SOURCE = resolve(process.env.EQUICORD_SOURCE ?? join(ROOT, "..", "source")
 const SETTINGS = process.env.EQUICORD_SETTINGS ?? join(process.env.APPDATA ?? "", "Equicord", "settings", "settings.json");
 const LOGS = join(homedir(), "Documents", "Equicord Logs");
 
-const USER_PLUGINS = ["activityTracker", "clientModDetector", "fakeDeafen", "fakeMedia", "lastMessageDate", "voiceFakeDetector"];
+const USER_PLUGINS = ["activityTracker", "clientModDetector", "fakeDeafen", "fakeMedia", "goLiveBypass", "lastMessageDate", "voiceFakeDetector"];
 const EDITED_PLUGINS = ["toastNotifications", "voiceChannelLog"];
 const TESTS = ["testActivityTracker.mjs", "testToastVoiceTracking.mjs", "testUserplugins.mjs", "testVoiceChannelHistory.mjs"];
 
@@ -24,7 +24,8 @@ const LAST_ONLINE_COMMIT = "493727b2b3d048dd28fe2cab5921117621ac8b92";
 const LAST_ONLINE_URL = `https://raw.githubusercontent.com/k1ng0p/LastOnlineTracker/${LAST_ONLINE_COMMIT}/index.tsx`;
 
 // The fakeDeafen clone keeps its own Git data and installers, which don't belong here.
-const isExcluded = path => /[\\/](\.git|install\.ps1|install\.sh)($|[\\/])/.test(path);
+// GoLiveBypass's prebuilt helper comes from install.mjs, and its internal docs stay upstream.
+const isExcluded = path => /[\\/](\.git|install\.ps1|install\.sh|goLiveBypass[\\/](bin|docs))($|[\\/])/.test(path);
 
 const copyPlugin = (from, to) => {
     rmSync(to, { recursive: true, force: true });

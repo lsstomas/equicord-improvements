@@ -29,6 +29,7 @@ Instructions for an AI agent installing these plugins for a user.
 - **TypeScript or build errors in `voiceChannelLog` or `toastNotifications`:** Equicord changed these plugins. Compare with commit `00abcbeea`, which this repository was built against, and report the conflict. Don't delete the user's plugins to get past it.
 - **`git apply` fails on LastOnlineTracker:** the author's file changed. It's pinned to a commit, so check that the download worked.
 - **Settings aren't saving:** restart Discord completely, then check the time on `settings.json`.
+- **WSL loses its network after GoLiveBypass is first turned on:** installing the WireSock driver can reset WSL's mirrored network adapters. Have the user restart the computer.
 
 ## Rules
 
