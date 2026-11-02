@@ -180,8 +180,8 @@ const DAY_MS = 86_400_000;
     const storage = memoryStorage();
     const store = openStore(storage);
     await store.open("me");
-    store.add(entryAt(Date.now(), { channelId: "c1" }));
-    store.add(entryAt(Date.now(), { channelId: "c2" }));
+    store.add(entryAt(Date.now(), { id: "first", channelId: "c1" }));
+    store.add(entryAt(Date.now(), { id: "second", channelId: "c2" }));
     await store.flush();
     await store.open("other");
     assert.equal(store.getEntries().length, 0, "Another account must not see these logs");
@@ -199,6 +199,37 @@ const DAY_MS = 86_400_000;
     off.add(entryAt(Date.now()));
     await off.flush();
     assert.equal(storage.data.size, 0, "Saving off must not write");
+}
+
+// Plugin start and CONNECTION_OPEN both open the history. Six restarts turned 100 logs into 6463.
+{
+    const { createDayStore } = await load("dayStore.ts");
+    const options = {
+        getTime: log => new Date(log.timestamp),
+        getId: log => log.id,
+        revive: raw => raw,
+        shouldPersist: () => true,
+        retentionDays: () => 0,
+        onError(message, error) { throw error; }
+    };
+    const now = Date.now();
+    const day = `me:${getDayKey(new Date(now))}`;
+    const storage = memoryStorage();
+    storage.data.set(day, Array.from({ length: 100 }, (_, id) => ({ id, timestamp: now - 1000 })));
+
+    for (let restart = 0; restart < 6; restart++) {
+        const store = createDayStore(storage, options);
+        await Promise.all([store.open("me"), store.open("me")]);
+        store.add({ id: `new-${restart}`, timestamp: now });
+        await store.flush();
+    }
+    assert.equal(storage.data.get(day).length, 106, "Opening twice at once must not copy the logs");
+
+    // History that was already duplicated heals on the next save.
+    storage.data.set(day, [...storage.data.get(day), ...storage.data.get(day)]);
+    const healed = createDayStore(storage, options);
+    await healed.open("me");
+    assert.equal(healed.getEntries().length, 106, "Saved duplicates must not reach memory");
 }
 
 // The shared day store, as ActivityTracker uses it.

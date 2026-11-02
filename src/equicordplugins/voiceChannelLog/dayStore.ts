@@ -16,6 +16,8 @@ export interface DayStoreStorage {
 
 export interface DayStoreOptions<T> {
     getTime(entry: T): Date;
+    /** Lets saved copies of the same record be dropped when they're loaded. */
+    getId?(entry: T): unknown;
     /** Returns null for records that can't be used. */
     revive(raw: unknown): T | null;
     shouldPersist(): boolean;
@@ -51,6 +53,7 @@ export function createDayStore<T>(storage: DayStoreStorage, options: DayStoreOpt
     let olderKeys: string[] = [];
     let listeners: (() => void)[] = [];
     let writes: Promise<void> = Promise.resolve();
+    let opening: { id: string; done: Promise<void>; } | null = null;
     const dirtyDays = new Set<string>();
 
     const dayOf = (entry: T) => getDayKey(options.getTime(entry));
@@ -94,10 +97,23 @@ export function createDayStore<T>(storage: DayStoreStorage, options: DayStoreOpt
 
     async function readBuckets(keys: string[]): Promise<T[]> {
         const buckets = await storage.getMany(keys);
-        return buckets
+        return withoutCopies(buckets
             .flatMap(bucket => Array.isArray(bucket) ? bucket : [])
             .map(options.revive)
-            .filter(entry => entry != null);
+            .filter(entry => entry != null));
+    }
+
+    function withoutCopies(records: T[]): T[] {
+        const { getId } = options;
+        if (!getId) return records;
+
+        const seen = new Set<unknown>();
+        return records.filter(record => {
+            const id = getId(record);
+            if (seen.has(id)) return false;
+            seen.add(id);
+            return true;
+        });
     }
 
     function daysAgo(days: number) {
@@ -126,37 +142,47 @@ export function createDayStore<T>(storage: DayStoreStorage, options: DayStoreOpt
         };
     }
 
-    return {
-        /** Loads an account's saved logs. Events recorded before this call are kept. */
-        async open(id: string) {
-            if (id === accountId) return;
+    async function loadAccount(id: string) {
+        await flush();
 
-            await flush();
+        if (accountId) {
+            entries = [];
+            dirtyDays.clear();
+        }
 
-            if (accountId) {
-                entries = [];
-                dirtyDays.clear();
-            }
+        accountId = id;
+        loaded = false;
+        olderKeys = [];
+        notify();
 
-            accountId = id;
-            loaded = false;
-            olderKeys = [];
+        try {
+            const { stored, older, expired } = await load(id);
+            if (accountId !== id) return;
+
+            entries = withoutCopies([...stored, ...entries]).sort(byTime);
+            olderKeys = older;
+            loaded = true;
             notify();
 
-            try {
-                const { stored, older, expired } = await load(id);
-                if (accountId !== id) return;
+            await Promise.all(expired.map(key => storage.del(key)));
+            await flush();
+        } catch (error) {
+            options.onError("Failed to load logs", error);
+        }
+    }
 
-                entries = [...stored, ...entries].sort(byTime);
-                olderKeys = older;
-                loaded = true;
-                notify();
+    return {
+        /** Loads an account's saved logs. Events recorded before this call are kept. */
+        open(id: string): Promise<void> {
+            if (opening?.id === id) return opening.done;
+            if (id === accountId) return Promise.resolve();
 
-                await Promise.all(expired.map(key => storage.del(key)));
-                await flush();
-            } catch (error) {
-                options.onError("Failed to load logs", error);
-            }
+            // Claimed before anything waits, so a second call can't load the same logs again.
+            const current = { id, done: loadAccount(id).finally(() => {
+                if (opening === current) opening = null;
+            }) };
+            opening = current;
+            return current.done;
         },
 
         add(entry: T) {

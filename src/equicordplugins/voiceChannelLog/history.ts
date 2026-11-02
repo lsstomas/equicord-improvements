@@ -61,6 +61,7 @@ export function createHistoryStore(storage: HistoryStorage, options: HistoryOpti
     const store = createDayStore<VoiceChannelLogEntry>(storage, {
         ...options,
         getTime: entry => entry.timestamp,
+        getId: entry => entry.id,
         revive: reviveEntry
     });
 
