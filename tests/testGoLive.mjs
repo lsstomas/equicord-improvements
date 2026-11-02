@@ -22,7 +22,8 @@ const load = async path => {
 
 const { buildAllowedIps, buildHoldPacUrl, GoLive, parseTraceCountry, shouldStartAtBoot } = await load("go-live.ts");
 const { sanitizeWireGuardConfig } = await load("vpn-types.ts");
-const { fastStartAllowed } = await load("vpn-windows.ts");
+const { fastStartAllowed, wireSockStillStopping } = await load("vpn-windows.ts");
+const { GatewayWatch } = await load("gateway-watch.ts");
 
 function pacDecides(url, host) {
     const source = Buffer.from(url.split("base64,")[1], "base64").toString();
@@ -105,8 +106,8 @@ SERVICE_NAME: wiresock-client-service
 assert.equal(parseTraceCountry("ip=1.2.3.4\nloc=MX\n"), "MX");
 assert.equal(parseTraceCountry("<html>"), null);
 
-function harness({ probes = ["MX"], hasRoute = true, startFails = false, canRotate = true, servers = ["MX-FREE#9"], fastAvailable = true } = {}) {
-    const state = { probes: [...probes], hasRoute, startFails, canRotate, fastAvailable, busy: false, sleeps: [], server: servers[0], running: false, order: [], starts: 0, stops: 0, avoided: [], filters: [], logs: [], proxies: [], time: 0 };
+function harness({ hellos = [true], probes = ["MX"], hasRoute = true, startFails = false, canRotate = true, servers = ["MX-FREE#9"], fastAvailable = true } = {}) {
+    const state = { hellos: [...hellos], probes: [...probes], hasRoute, startFails, canRotate, fastAvailable, busy: false, sleeps: [], server: servers[0], running: false, order: [], starts: 0, stops: 0, avoided: [], filters: [], logs: [], proxies: [], time: 0 };
     let next = 1;
     const session = {
         async setProxy(config) {
@@ -159,6 +160,10 @@ function harness({ probes = ["MX"], hasRoute = true, startFails = false, canRota
         },
         log: (level, message) => state.logs.push(`${level} ${message}`),
         resolveGateway: async () => ["162.159.130.234"],
+        async gatewayHello() {
+            state.order.push("hello");
+            return state.hellos.length > 1 ? state.hellos.shift() : state.hellos[0];
+        },
         now: () => state.time,
         sleep: async ms => { state.sleeps.push(ms); },
     });
@@ -329,7 +334,7 @@ function harness({ probes = ["MX"], hasRoute = true, startFails = false, canRota
     const status = await goLive.checkNow();
     assert.equal(status.state, "active");
     assert.equal(state.avoided.length, 0);
-    assert.deepEqual(state.order.slice(-3), ["stop", "start", "probe"]);
+    assert.deepEqual(state.order.slice(-4), ["stop", "start", "probe", "hello"]);
     cleanup();
 }
 
@@ -392,6 +397,87 @@ function harness({ probes = ["MX"], hasRoute = true, startFails = false, canRota
     const { goLive, state, cleanup } = harness();
     await Promise.all([goLive.configure(true), goLive.configure(true)]);
     assert.equal(state.starts, 1);
+    cleanup();
+}
+
+// O aviso do gateway só conta depois da primeira conexão e se repete enquanto durar.
+{
+    const watch = new GatewayWatch(15_000);
+    assert.equal(watch.observe(false, 0), false, "Opening waits for the tunnel on purpose");
+    assert.equal(watch.observe(false, 60_000), false);
+    assert.equal(watch.observe(true, 61_000), false);
+    assert.equal(watch.observe(false, 62_000), false);
+    assert.equal(watch.observe(false, 70_000), false, "A quick reconnect isn't a failure");
+    assert.equal(watch.observe(true, 71_000), false);
+    assert.equal(watch.observe(false, 72_000), false);
+    assert.equal(watch.observe(false, 87_000), true);
+    assert.equal(watch.observe(false, 90_000), false);
+    assert.equal(watch.observe(false, 102_000), true);
+}
+
+// Reabrir enquanto o serviço ainda para espera em vez de cair no caminho lento.
+{
+    const stopped = { code: 0, stdout: "STATE : 1 STOPPED" };
+    const none = { code: 0, stdout: "INFO: No tasks" };
+    assert.equal(wireSockStillStopping({ service: { code: 0, stdout: "STATE : 3 STOP_PENDING" }, processes: none }), true);
+    assert.equal(wireSockStillStopping({ service: stopped, processes: { code: 0, stdout: "wiresock-client.exe 123" } }), true);
+    assert.equal(wireSockStillStopping({ service: stopped, processes: none }), false);
+    assert.equal(wireSockStillStopping({ service: { code: 0, stdout: "STATE : 4 RUNNING" }, processes: none }), false, "A running service goes to the normal path");
+}
+
+// Oscilação do Discord: o gateway responde, então o túnel não é tocado.
+{
+    const { goLive, state, cleanup } = harness();
+    await goLive.configure(true);
+    const stops = state.stops;
+    const status = await goLive.gatewayDown();
+    assert.equal(status.state, "active");
+    assert.equal(state.stops, stops);
+    assert.ok(state.logs.some(line => line.includes("sessão do gateway caiu")));
+    cleanup();
+}
+
+// O caso real: a sonda HTTP passa e o gateway não responde. A rota religa com o gateway preso.
+{
+    const { goLive, state, cleanup } = harness({ hellos: [false, true] });
+    await goLive.configure(true);
+    state.order.length = 0;
+    const status = await goLive.gatewayDown();
+    assert.equal(status.state, "active");
+    assert.equal(status.server, "MX-FREE#9");
+    assert.deepEqual(state.order.filter(step => step !== "probe"), ["hello", "hold", "stop", "start", "hello", "release"]);
+    cleanup();
+}
+
+// Religar não resolveu: a mesma rota não é usada de novo.
+{
+    const { goLive, state, cleanup } = harness({ hellos: [false, true, false, true], servers: ["MX-FREE#9", "US-FREE#3"] });
+    await goLive.configure(true);
+    await goLive.gatewayDown();
+    state.time += 60_000;
+    const status = await goLive.gatewayDown();
+    assert.equal(status.state, "active");
+    assert.equal(status.server, "US-FREE#3");
+    assert.deepEqual(state.avoided, [["MX-FREE#9"]]);
+    cleanup();
+}
+
+// Rota que responde HTTP mas não entrega o gateway é recusada também na troca.
+{
+    const { goLive, state, cleanup } = harness({ hellos: [false], servers: ["MX-FREE#9", "US-FREE#3", "NL-FREE#1"] });
+    await goLive.configure(true);
+    const status = await goLive.gatewayDown();
+    assert.equal(status.state, "fallback");
+    assert.equal(state.running, false);
+    assert.equal(state.proxies.at(-1), "direct", "Never stays held on a dead route");
+    cleanup();
+}
+
+// Com o Go Live desligado o aviso não faz nada.
+{
+    const { goLive, state, cleanup } = harness();
+    assert.equal((await goLive.gatewayDown()).state, "off");
+    assert.equal(state.starts, 0);
     cleanup();
 }
 

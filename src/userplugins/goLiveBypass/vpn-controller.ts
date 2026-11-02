@@ -472,6 +472,19 @@ export class PluginVpnController {
         return this.serial(() => this.stopInternal(false));
     }
 
+    // O túnel do Go Live só leva o Discord, então fechar não depende de confirmar a parada: se o
+    // pedido se perder, a próxima abertura cuida da sobra. Apaga o lock para ela usar o caminho rápido.
+    public quitGoLiveTunnel(): boolean {
+        if (!isWindows() || this.goLiveAllowedIps === null || this.state !== "active" || this.isRouteOperationRunning()) return false;
+        const owner = this.readOwner();
+        if (!owner || !sameOwnership(this.ownershipToken, owner) || !windows.requestWireSockStop()) return false;
+        this.stopWatchdog();
+        fs.rmSync(this.ownerPath, { force: true });
+        this.ownershipToken = null;
+        this.state = "inactive";
+        return true;
+    }
+
     public hasGoLiveRoute(): boolean {
         const settings = this.settings();
         return settings.mode === "custom" ? Boolean(settings.customConfigPath) : Boolean(settings.protonUsername);
@@ -519,6 +532,7 @@ export class PluginVpnController {
             if (inspection.externalConflict && !owner) return false;
             return inspection.active || Boolean(owner);
         }
+        if (this.state === "inactive" && !fs.existsSync(this.ownerPath) && windows.wireSockServicesStopped()) return false;
         const inspection = this.inspectWindows();
         if (isUnknownWireSockInspection(inspection)) return this.state !== "blocked_external";
         if (inspection.active) return inspection.owned;

@@ -4,7 +4,7 @@ Instructions for an AI agent installing these plugins for a user.
 
 ## Before you start
 
-- Requires Node.js 18 or newer, pnpm and Git. Equicord's `package.json` sets the pnpm version, and `corepack pnpm` picks it up.
+- Requires Node.js 22 or newer, pnpm and Git. Equicord's `package.json` sets the pnpm version, and `corepack pnpm` picks it up.
 - Find out whether the user already has an Equicord source folder. If not, clone https://github.com/Equicord/Equicord and run `pnpm install --frozen-lockfile`.
 - Ask before running `--settings`, `pnpm inject`, or restarting Discord. These change the user's setup, and a restart can drop them from a call.
 

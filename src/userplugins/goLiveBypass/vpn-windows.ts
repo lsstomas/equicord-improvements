@@ -1003,6 +1003,9 @@ export interface FastStartSamples {
 
 const SERVICE_STOPPED = /STATE\s*:\s*1\b/;
 const SERVICE_NOT_INSTALLED = 1060;
+const SERVICE_STOP_PENDING = /STATE\s*:\s*3\b/;
+const STOP_WAIT_ATTEMPTS = 15;
+const STOP_WAIT_DELAY_MS = 200;
 
 // Tudo aqui precisa estar como um fechamento limpo deixa. Qualquer dúvida devolve false, e o
 // caminho normal, que sabe recuperar e adotar, assume.
@@ -1023,7 +1026,13 @@ function sampleCommand(file: string, args: string[]): Promise<CommandSample> {
     });
 }
 
-export async function canFastStartWireSock(configPath: string): Promise<boolean> {
+// O fechamento rápido não espera o serviço parar, e reabrir logo depois pode alcançá-lo no meio disso.
+export function wireSockStillStopping({ service, processes }: Pick<FastStartSamples, "service" | "processes">): boolean {
+    if (SERVICE_STOP_PENDING.test(service.stdout)) return true;
+    return SERVICE_STOPPED.test(service.stdout) && processes.stdout.toLowerCase().includes("wiresock-client.exe");
+}
+
+async function sampleFastStart(configPath: string): Promise<FastStartSamples> {
     const [mainService, proService] = VPN_SERVICE_NAMES;
     const [service, serviceConfig, pro, processes] = await Promise.all([
         sampleCommand("sc.exe", ["query", mainService]),
@@ -1031,7 +1040,30 @@ export async function canFastStartWireSock(configPath: string): Promise<boolean>
         sampleCommand("sc.exe", ["query", proService]),
         sampleCommand("tasklist", ["/FI", "IMAGENAME eq wiresock-client.exe", "/NH"]),
     ]);
-    return fastStartAllowed({ configPath, service, serviceConfig, proService: pro, processes });
+    return { configPath, service, serviceConfig, proService: pro, processes };
+}
+
+export async function canFastStartWireSock(configPath: string): Promise<boolean> {
+    let samples = await sampleFastStart(configPath);
+    for (let attempt = 0; attempt < STOP_WAIT_ATTEMPTS && wireSockStillStopping(samples); attempt++) {
+        await wait(STOP_WAIT_DELAY_MS);
+        samples = await sampleFastStart(configPath);
+    }
+    return fastStartAllowed(samples);
+}
+
+// Só pede a parada, que o `sc.exe` entrega e devolve na hora. Quem chama está saindo do processo.
+export function requestWireSockStop(): boolean {
+    try {
+        execFileSync("sc.exe", ["stop", VPN_SERVICE_NAMES[0]], { stdio: "ignore", windowsHide: true, timeout: 2_000 });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+export function wireSockServicesStopped(): boolean {
+    return VPN_SERVICE_NAMES.every(name => serviceRunningFromSc(name) === false);
 }
 
 // Sem chamada síncrona: isto roda na abertura, no processo principal do Discord.
@@ -1227,15 +1259,8 @@ export async function stopOwnedWireSock(
     const dnsCleared = false;
     const residual = await inspectWireSockUntilReliable(configPath);
     const stopped = residual.reliable && !residual.active;
-    let dnsFlushed = false;
-    if (stopped && initial.active && initial.owned) {
-        try {
-            execFileSync("ipconfig.exe", ["/flushdns"], { stdio: "ignore", windowsHide: true, timeout: 10_000 });
-            dnsFlushed = true;
-        } catch (error) {
-            log("warn", "flushdns falhou", { erro: logError(error) });
-        }
-    }
+    // Os perfis não mexem em DNS, e o flushdns exige administrador: sem elevação ele só falha.
+    const dnsFlushed = false;
     if (!stopped && !residual.reliable) log("error", "limpeza não confirmou o estado final do WireSock", { motivo: residual.reason || UNKNOWN_WIRESOCK_STATE });
     else if (!stopped) log("error", "limpeza deixou resíduo WireSock próprio", { services: residual.services, pids: residual.processIds });
     else log("info", "WireSock próprio parado; lock global e DNS de adaptadores foram preservados");
@@ -1312,13 +1337,7 @@ export async function stopManagedWireSock(configPath: string, guiConfigPath: str
     // A managed config/PID does not prove ownership of global lock/DNS state.
     const networkLockReset = false;
     const dnsCleared = false;
-    let dnsFlushed = false;
-    try {
-        execFileSync("ipconfig.exe", ["/flushdns"], { stdio: "ignore", windowsHide: true, timeout: 10_000 });
-        dnsFlushed = true;
-    } catch (error) {
-        log("warn", "flushdns falhou", { erro: logError(error) });
-    }
+    const dnsFlushed = false;
     log("info", "WireSock da GUI GoLiveBypass encerrado; plugin assumiu o serviço", { networkLockReset });
     return { stopped: true, servicesResidual: [], processResidual: [], networkLockReset, dnsCleared, dnsFlushed };
 }

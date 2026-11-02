@@ -19,6 +19,7 @@ import { findStoreLazy } from "@webpack";
 import { closeModal as closeDiscordModal, Constants, MaskedLink, Modal, openModal, React, RestAPI, SearchableSelect, showToast as showDiscordToast, TextArea, TextInput, useEffect, UserStore, useState } from "@webpack/common";
 
 import { ControlPanel, type ControlPanelController, PANEL_TONE_LABEL, panelIconFor, PanelIconOff, type PanelTone,panelTone } from "./control-panel";
+import { GatewayWatch } from "./gateway-watch";
 import type { GoLiveStatus } from "./go-live";
 import {
     formatProtonRoutePing,
@@ -99,6 +100,10 @@ interface PluginUpdateNative {
 }
 
 type PluginIpcExports = Omit<typeof import("./native"), "findLinuxNetnsLauncher">;
+// O Discord reconecta sozinho em poucos segundos; passar disso pelo túnel é rota com problema.
+const GATEWAY_WATCH_INTERVAL_MS = 3_000;
+const GATEWAY_DOWN_LIMIT_MS = 15_000;
+
 const Native = VencordNative?.pluginHelpers?.GoLiveBypass as unknown as (PluginNative<PluginIpcExports> & PluginUpdateNative) | undefined;
 
 const logger = new Logger("GoLiveBypass");
@@ -137,6 +142,7 @@ const ApexExperimentStore: ApexExperiments & DiagnosticStore = findStoreLazy("Ap
 const ApplicationStreamingStore: DiagnosticStore = findStoreLazy("ApplicationStreamingStore");
 const StreamRTCConnectionStore: DiagnosticStore = findStoreLazy("StreamRTCConnectionStore");
 const RTCConnectionStore: DiagnosticStore = findStoreLazy("RTCConnectionStore");
+const GatewayConnectionStore: { isConnected(): boolean; } = findStoreLazy("GatewayConnectionStore");
 
 const VIDEO_GUARD = "2026-08-video-guard";
 
@@ -154,6 +160,7 @@ const STREAM_KEYS: "streamRegion"[] = ["streamRegion"];
 
 let original: RegionStore | undefined;
 let streamClaimTimer: ReturnType<typeof setInterval> | null = null;
+let gatewayWatchTimer: ReturnType<typeof setInterval> | null = null;
 let updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
 let lastNotifiedPendingVersion: string | null = null;
 let lastNotifiedUpdateErrorKey: string | null = null;
@@ -2826,6 +2833,27 @@ function startStreamClaimWatch() {
     streamClaimTimer = setInterval(pollStreamClaim, 5_000);
 }
 
+function startGatewayWatch() {
+    if (gatewayWatchTimer !== null || typeof Native?.reportGatewayDown !== "function") return;
+    const watch = new GatewayWatch(GATEWAY_DOWN_LIMIT_MS);
+    gatewayWatchTimer = setInterval(() => {
+        if (settings.store.goLive !== true) return;
+        try {
+            if (!watch.observe(GatewayConnectionStore.isConnected(), Date.now())) return;
+        } catch (error) {
+            stopGatewayWatch();
+            recordRendererError("Gateway watch stopped", error);
+            return;
+        }
+        void Promise.resolve(Native.reportGatewayDown()).catch(error => recordRendererError("Failed to report the gateway", error));
+    }, GATEWAY_WATCH_INTERVAL_MS);
+}
+
+function stopGatewayWatch() {
+    if (gatewayWatchTimer !== null) clearInterval(gatewayWatchTimer);
+    gatewayWatchTimer = null;
+}
+
 function stopStreamClaimWatch() {
     if (streamClaimTimer !== null) clearInterval(streamClaimTimer);
     streamClaimTimer = null;
@@ -3120,6 +3148,7 @@ export default definePlugin({
         const isLifecycleCurrent = () => lifecycleGeneration === pluginLifecycleGeneration;
         forceRegion();
         startStreamClaimWatch();
+        startGatewayWatch();
 
         const onboardingRequired = Native && settings.store.onboardingCompleted !== true;
         if (onboardingTimer !== null) {
@@ -3208,6 +3237,7 @@ export default definePlugin({
             bugReportOpen = false;
         }
         stopStreamClaimWatch();
+        stopGatewayWatch();
         restoreRegion();
         if (typeof Native?.shutdown === "function") {
             void Native.shutdown().catch(error => recordRendererError("Failed to reach the desktop process", error));

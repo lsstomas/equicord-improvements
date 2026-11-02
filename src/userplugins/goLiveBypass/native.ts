@@ -1032,6 +1032,10 @@ export function checkGoLive(_: IpcMainInvokeEvent) {
     return goLive()?.checkNow() ?? null;
 }
 
+export function reportGatewayDown(_: IpcMainInvokeEvent) {
+    return goLive()?.gatewayDown() ?? null;
+}
+
 export function shutdown(_: IpcMainInvokeEvent) {
     // Desativar o userplugin no Windows não reinicia o Discord para não interromper
     // chamadas em andamento. No Linux, contudo, um processo dentro de netns não consegue
@@ -2847,6 +2851,12 @@ async function rebuildUserplugin(projectRoot: string): Promise<void> {
 app.on("before-quit", event => {
     if (controller.isRelaunching() || quitting) return;
     controller.cancelProtonLogin();
+    // Sem preventDefault: o Discord fecha na hora e o renderer ainda salva o que tem pendente.
+    if (controller.quitGoLiveTunnel()) {
+        quitting = true;
+        goLiveInstance?.dispose();
+        return;
+    }
     if (!controller.hasCleanupWork()) return;
     event.preventDefault();
     quitting = true;

@@ -13,6 +13,10 @@
  *
  * Quem confirma a rota é uma sonda real pelo mesmo filtro. Rota morta nunca prende o Discord: o
  * túnel desliga na hora, ele segue pela rede normal, e a recuperação acontece por fora.
+ *
+ * A sonda HTTP sozinha não basta: o gateway já ficou minutos sem conectar sem ela acusar nada. Por
+ * isso o renderer avisa quando a sessão cai, e uma rota só volta a valer depois de entregar o
+ * OP_HELLO de verdade.
  */
 
 import { resolve4 } from "node:dns/promises";
@@ -53,6 +57,8 @@ export interface GoLiveOptions {
     tunnel: GoLiveTunnel;
     log(level: "info" | "warn" | "error", message: string, data?: Record<string, unknown>): void;
     resolveGateway?(): Promise<string[]>;
+    /** Abre o gateway de verdade e espera o OP_HELLO. */
+    gatewayHello?(timeoutMs: number): Promise<boolean>;
     now?(): number;
     sleep?(ms: number): Promise<void>;
 }
@@ -70,6 +76,10 @@ const BOOT_PROBE_TIMEOUT_MS = 2_000;
 const HOLD_LIMIT_MS = 15_000;
 const ROUTE_ATTEMPTS = 2;
 const RECOVERY_BACKOFF_MS = 5 * 60_000;
+const GATEWAY_URL = "wss://gateway.discord.gg/?v=9&encoding=json";
+const GATEWAY_HELLO_TIMEOUT_MS = 6_000;
+// Dentro desta janela um novo aviso significa que religar a rota não resolveu.
+const GATEWAY_TROUBLE_WINDOW_MS = 3 * 60_000;
 
 // Toda a mídia observada veio de 104.29.0.0/16; o bloco 66.22 é o histórico do Discord.
 const MEDIA_RANGES = ["104.29.0.0/16", "66.22.192.0/18"];
@@ -94,6 +104,23 @@ export function buildHoldPacUrl(): string {
     return `data:application/x-ns-proxy-autoconfig;base64,${Buffer.from(script).toString("base64")}`;
 }
 
+// A rede do processo principal não passa pelo freio de PAC, então isto mede o túnel mesmo com o
+// gateway do renderer preso. Sem WebSocket no runtime a resposta é a da sonda HTTP.
+function openGatewayHello(timeoutMs: number): Promise<boolean> {
+    if (typeof WebSocket !== "function") return Promise.resolve(true);
+    return new Promise(done => {
+        const socket = new WebSocket(GATEWAY_URL);
+        const finish = (ok: boolean) => {
+            clearTimeout(timer);
+            try { socket.close(); } catch { /* já fechado */ }
+            done(ok);
+        };
+        const timer = setTimeout(() => finish(false), timeoutMs);
+        socket.onmessage = event => finish(String(event.data).includes('"op":10'));
+        socket.onerror = () => finish(false);
+    });
+}
+
 export function shouldStartAtBoot(settings: { enabled?: unknown; goLive?: unknown; }): boolean {
     return settings.enabled === true && settings.goLive === true;
 }
@@ -105,6 +132,7 @@ export function parseTraceCountry(body: string): string | null {
 export class GoLive {
     private readonly options: GoLiveOptions;
     private readonly resolveGateway: NonNullable<GoLiveOptions["resolveGateway"]>;
+    private readonly gatewayHello: NonNullable<GoLiveOptions["gatewayHello"]>;
     private readonly now: NonNullable<GoLiveOptions["now"]>;
     private readonly sleep: NonNullable<GoLiveOptions["sleep"]>;
 
@@ -117,11 +145,14 @@ export class GoLive {
     private holdTimer: ReturnType<typeof setTimeout> | null = null;
     private checkTimer: ReturnType<typeof setInterval> | null = null;
     private nextRecoveryAt = 0;
+    private gatewayTroubleUntil = 0;
+    private restartedForGateway = false;
     private queue: Promise<unknown> = Promise.resolve();
 
     public constructor(options: GoLiveOptions) {
         this.options = options;
         this.resolveGateway = options.resolveGateway ?? (() => resolve4("gateway.discord.gg"));
+        this.gatewayHello = options.gatewayHello ?? openGatewayHello;
         this.now = options.now ?? Date.now;
         this.sleep = options.sleep ?? (ms => new Promise(done => setTimeout(done, ms)));
     }
@@ -165,6 +196,10 @@ export class GoLive {
 
     public checkNow(): Promise<GoLiveStatus> {
         return this.serial(() => this.check());
+    }
+
+    public gatewayDown(): Promise<GoLiveStatus> {
+        return this.serial(() => this.handleGatewayDown());
     }
 
     public settled(): Promise<void> {
@@ -224,14 +259,18 @@ export class GoLive {
     }
 
     // Liga o túnel e só aceita a rota depois de a sonda sair por outro país.
-    private async connect(): Promise<boolean> {
+    private async connect(verifyGateway = false): Promise<boolean> {
         const started = await this.options.tunnel.start(buildAllowedIps(await this.gatewayAddresses()));
         if (!started.success) {
             this.error = started.error ?? "The tunnel didn't start.";
             this.options.log("warn", "Go Live: o túnel não ligou", { erro: this.error });
             return false;
         }
-        return this.probeUntilReady();
+        if (!await this.probeUntilReady()) return false;
+        if (!verifyGateway) return true;
+        const answered = await this.gatewayHello(GATEWAY_HELLO_TIMEOUT_MS);
+        if (!answered) this.options.log("warn", "Go Live: a rota responde, mas não entrega o gateway");
+        return answered;
     }
 
     private async probeUntilReady(attempts = STARTUP_PROBES, delayMs = PROBE_RETRY_DELAY_MS, timeoutMs = PROBE_TIMEOUT_MS): Promise<boolean> {
@@ -269,9 +308,39 @@ export class GoLive {
         await this.recover();
     }
 
+    // Primeiro aviso com o gateway respondendo é oscilação do Discord: ele mesmo reconecta. Fora
+    // isso, religa a rota com o gateway preso, para ele não abrir a sessão pela rede normal e nascer
+    // bloqueado. Se o aviso se repetir, a rota não serve mais.
+    private async handleGatewayDown(): Promise<void> {
+        if (!this.enabled || this.state !== "active" || this.options.tunnel.isBusy()) return;
+
+        const now = this.now();
+        const recent = now < this.gatewayTroubleUntil;
+        if (!recent) this.restartedForGateway = false;
+        this.gatewayTroubleUntil = now + GATEWAY_TROUBLE_WINDOW_MS;
+
+        const httpOk = await this.probe();
+        const helloOk = await this.gatewayHello(GATEWAY_HELLO_TIMEOUT_MS);
+        this.options.log("warn", "Go Live: a sessão do gateway caiu", { servidor: this.options.tunnel.currentServer(), httpOk, helloOk, recent });
+        if (helloOk && !recent) return;
+
+        if (!this.restartedForGateway) {
+            this.restartedForGateway = true;
+            this.setState("starting");
+            await this.holdGateway();
+            await this.options.tunnel.stop();
+            if (await this.connect(true)) {
+                await this.releaseGateway();
+                this.finishRecovery();
+                return;
+            }
+        }
+        await this.recover(true);
+    }
+
     // Tenta a rota atual de novo (uma queda pode ser passageira) e depois outras. O Discord fica
     // na rede normal durante tudo isso, porque gerar uma rota leva bem mais que uma reconexão.
-    private async recover(): Promise<void> {
+    private async recover(skipCurrentRoute = false): Promise<void> {
         await this.options.tunnel.stop();
         await this.releaseGateway();
         this.setState("fallback");
@@ -279,8 +348,10 @@ export class GoLive {
         this.error = "Looking for a route that responds…";
 
         const avoid: string[] = [];
-        if (await this.connect()) return this.finishRecovery();
-        await this.options.tunnel.stop();
+        if (!skipCurrentRoute) {
+            if (await this.connect(true)) return this.finishRecovery();
+            await this.options.tunnel.stop();
+        }
 
         for (let attempt = 0; attempt < ROUTE_ATTEMPTS; attempt++) {
             const server = this.options.tunnel.currentServer();
@@ -290,7 +361,7 @@ export class GoLive {
                 this.options.log("warn", "Go Live: não consegui gerar outra rota", { erro: rotated.error });
                 break;
             }
-            if (await this.connect()) return this.finishRecovery();
+            if (await this.connect(true)) return this.finishRecovery();
             await this.options.tunnel.stop();
         }
 
