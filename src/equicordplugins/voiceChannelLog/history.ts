@@ -4,13 +4,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { createDayStore, DayStoreOptions, DayStoreStorage, getDayKey } from "./dayStore";
+import { getDayKey } from "./dayStore";
 import { LogEventType, VoiceChannelLogEntry } from "./types";
 
 export { getDayKey };
-
-export type HistoryStorage = DayStoreStorage;
-export type HistoryOptions = Omit<DayStoreOptions<VoiceChannelLogEntry>, "getTime" | "revive">;
 
 export type EventGroup = "all" | "presence" | "voice" | "camera" | "stream" | "soundboard" | "activity";
 
@@ -47,7 +44,7 @@ const GROUP_BY_TYPE: Record<LogEventType, EventGroup> = {
     activity_stop: "activity"
 };
 
-function reviveEntry(raw: unknown): VoiceChannelLogEntry | null {
+export function reviveEntry(raw: unknown): VoiceChannelLogEntry | null {
     if (!raw || typeof raw !== "object") return null;
 
     const entry = raw as VoiceChannelLogEntry;
@@ -57,26 +54,11 @@ function reviveEntry(raw: unknown): VoiceChannelLogEntry | null {
     return Number.isNaN(timestamp.getTime()) ? null : { ...entry, timestamp };
 }
 
-export function createHistoryStore(storage: HistoryStorage, options: HistoryOptions) {
-    const store = createDayStore<VoiceChannelLogEntry>(storage, {
-        ...options,
-        getTime: entry => entry.timestamp,
-        getId: entry => entry.id,
-        revive: reviveEntry
-    });
-
-    return {
-        ...store,
-        /** Deletes one channel's logs, or every log when no channel is given. */
-        clear: (channelId?: string) => store.clear(channelId ? entry => entry.channelId === channelId : undefined)
-    };
-}
-
 export function getUserLabel(entry: VoiceChannelLogEntry): string {
     return entry.displayName ?? entry.username ?? "Unknown";
 }
 
-export function getChannelLabel(entry: VoiceChannelLogEntry): string {
+export function getChannelLabel(entry: Pick<VoiceChannelLogEntry, "channelName" | "guildId" | "guildName">): string {
     const channel = entry.channelName ?? "Unknown channel";
     if (!entry.guildId) return channel;
     return `#${channel} · ${entry.guildName ?? "Unknown server"}`;
@@ -135,15 +117,6 @@ export function filterEntries(entries: VoiceChannelLogEntry[], { channelId, grou
         return [entry.displayName, entry.username, entry.userId, entry.channelName, entry.guildName, describeEntry(entry)]
             .some(text => text?.toLowerCase().includes(search));
     }).reverse();
-}
-
-export function listChannels(entries: VoiceChannelLogEntry[]): { label: string; value: string; }[] {
-    const channels = new Map<string, string>();
-    for (const entry of entries) channels.set(entry.channelId, getChannelLabel(entry));
-
-    return [...channels]
-        .map(([value, label]) => ({ label, value }))
-        .sort((a, b) => a.label.localeCompare(b.label));
 }
 
 export function toExportRecord(entry: VoiceChannelLogEntry) {

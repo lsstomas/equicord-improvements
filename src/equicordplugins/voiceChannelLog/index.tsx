@@ -13,7 +13,7 @@ import { ApplicationStore, ChannelStore, GuildStore, Menu, RelationshipStore, Se
 
 import { LogIcon, OpenLogsButton } from "./components/LogsButton";
 import { openVoiceChannelLog } from "./components/VoiceChannelLogModal";
-import { addLogEntry, archiveHistory, flushHistory, openHistory } from "./logs";
+import { addLogEntry, flushHistory, openHistory, pruneHistory } from "./logs";
 import settings from "./settings";
 import { EmbeddedActivityEvent, LogEventType, PreviousVoiceState, SoundEvent, VoiceChannelLogEntry, VoiceState } from "./types";
 import { getVoiceEvents, getVoiceFlags, toPreviousState } from "./voiceEvents";
@@ -21,7 +21,7 @@ import { getVoiceEvents, getVoiceFlags, toPreviousState } from "./voiceEvents";
 const { fetchApplication } = findByPropsLazy("fetchApplication");
 
 const JOIN_SYNC_WINDOW_MS = 5000;
-const ARCHIVE_CHECK_MS = 6 * 60 * 60 * 1000;
+const PRUNE_CHECK_MS = 6 * 60 * 60 * 1000;
 
 const EVENT_SETTINGS: Partial<Record<LogEventType, keyof typeof settings.store>> = {
     join: "logJoinLeave",
@@ -42,7 +42,7 @@ const previousStates = new Map<string, PreviousVoiceState>();
 let currentChannelId: string | null = null;
 let callStartedAt: number | null = null;
 let entryCount = 0;
-let archiveTimer: ReturnType<typeof setInterval> | undefined;
+let pruneTimer: ReturnType<typeof setInterval> | undefined;
 
 function shouldLog(userId: string): boolean {
     return !(settings.store.ignoreBlockedUsers && RelationshipStore.isBlocked(userId));
@@ -123,7 +123,7 @@ function syncVoiceChannel(nextChannelId: string | null) {
 
 function syncAccount() {
     const userId = UserStore.getCurrentUser()?.id;
-    if (userId) void openHistory(userId).then(archiveHistory);
+    if (userId) openHistory(userId);
 }
 
 function saveBeforeClosing() {
@@ -269,12 +269,12 @@ export default definePlugin({
         syncAccount();
         syncVoiceChannel(SelectedChannelStore.getVoiceChannelId() ?? null);
         window.addEventListener("beforeunload", saveBeforeClosing);
-        archiveTimer = setInterval(archiveHistory, ARCHIVE_CHECK_MS);
+        pruneTimer = setInterval(pruneHistory, PRUNE_CHECK_MS);
     },
 
     stop() {
         window.removeEventListener("beforeunload", saveBeforeClosing);
-        clearInterval(archiveTimer);
+        clearInterval(pruneTimer);
         previousStates.clear();
         loggedActivities.clear();
         currentChannelId = null;

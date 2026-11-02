@@ -9,9 +9,10 @@ import { classNameFactory } from "@utils/css";
 import { saveFile } from "@utils/web";
 import { findByPropsLazy } from "@webpack";
 
-import { getDayKey, toExportRecord } from "./history";
+import { getDayKey, LogFilter, toExportRecord } from "./history";
+import { readAllLogs } from "./logs";
 import settings from "./settings";
-import { Emoji, VoiceChannelLogEntry } from "./types";
+import { Emoji } from "./types";
 
 export const cl = classNameFactory("vc-voice-channel-log-");
 
@@ -37,7 +38,8 @@ export async function downloadSound(id: string): Promise<void> {
     }
 }
 
-export function exportLogs(entries: VoiceChannelLogEntry[]) {
+export async function exportLogs(filter: LogFilter) {
+    const entries = await readAllLogs(filter);
     const filename = `voice-channel-logs-${getDayKey(new Date())}.json`;
     const json = JSON.stringify(entries.map(toExportRecord), null, 2);
 

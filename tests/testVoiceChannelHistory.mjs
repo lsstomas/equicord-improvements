@@ -49,156 +49,321 @@ function memoryStorage() {
 }
 
 const history = await load("history.ts");
-const { createHistoryStore, describeEntry, filterEntries, getDayKey, listChannels, toExportRecord } = history;
+const { describeEntry, filterEntries, getDayKey, reviveEntry, toExportRecord } = history;
+const { CHUNK_SIZE, createLogStore, decodeChunk, encodeChunk } = await load("logStore.ts");
 
 const entryAt = (timestamp, overrides = {}) => ({ id: String(timestamp), type: "join", userId: "u1", channelId: "c1", timestamp: new Date(timestamp), ...overrides });
 globalThis.IS_DISCORD_DESKTOP = false;
-
-const openStore = (storage, retention = 0, errors = []) => createHistoryStore(storage, {
-    shouldPersist: () => true,
-    retentionDays: () => retention,
-    onError: (message, error) => errors.push([message, error])
-});
 const DAY_MS = 86_400_000;
+const FILTER = { channelId: null, group: "all", query: "" };
 
-// A restart must bring saved logs back, split by day.
+const openStore = (storage, overrides = {}) => createLogStore(storage, {
+    shouldPersist: () => true,
+    retentionDays: () => 0,
+    onError(message, error) { throw error ?? new Error(message); },
+    ...overrides
+});
+const chunkKeys = storage => [...storage.data.keys()].filter(key => key.startsWith("v2:"));
+
+function countingStorage() {
+    const storage = memoryStorage();
+    const counts = { keys: 0, getMany: 0, set: 0 };
+    const { keys, getMany, set } = storage;
+    storage.keys = function () { counts.keys++; return keys.call(this); };
+    storage.getMany = function (list) { counts.getMany++; return getMany.call(this, list); };
+    storage.set = function (key, value) { counts.set++; return set.call(this, key, value); };
+    return { storage, counts };
+}
+
+// The compact format must give back everything the log shows, and nothing may be lost in between.
+{
+    const base = Date.now();
+    // A user or channel keeps one name inside a chunk, as it does in a real call.
+    const ana = { username: "ana", displayName: "Ana", avatar: "hash" };
+    const bob = { username: "bob" };
+    const general = { guildId: "g", guildName: "Friends", channelName: "general" };
+    const entries = [
+        entryAt(base, { id: "a", callStartedAt: base - 5000, ...ana, ...general, flags: ["muted", "camera on"] }),
+        entryAt(base + 1, { id: "b", type: "self_mute", enabled: false, userId: "u2", ...bob, ...general, callStartedAt: base - 5000 }),
+        entryAt(base + 2, { id: "c", type: "self_video", enabled: true, channelId: "c2", ...ana }),
+        entryAt(base + 3, { id: "d", type: "move", ...ana, ...general, oldChannelId: "c1", oldChannelName: "general", newChannelId: "c2", newChannelName: "games" }),
+        entryAt(base + 4, { id: "e", type: "soundboard", ...ana, ...general, soundId: "s", emoji: { name: "x", animated: false } }),
+        entryAt(base + 5, { id: "f", type: "activity", ...ana, ...general, activityName: "Chess", applicationId: "app" }),
+        entryAt(base + 6, { id: "g", ...ana, ...general, flags: [] })
+    ];
+    const decoded = decodeChunk(structuredClone(encodeChunk(entries)), "k");
+
+    assert.equal(decoded.length, entries.length);
+    decoded.forEach((entry, index) => {
+        const { id, ...rest } = entries[index];
+        assert.deepEqual({ ...entry, id: undefined }, { ...rest, id: undefined }, `Entry ${id} must survive the format`);
+    });
+    assert.equal(new Set(decoded.map(entry => entry.id)).size, entries.length, "Rows need unique keys");
+
+    // The whole point: repeated names are stored once.
+    const many = Array.from({ length: CHUNK_SIZE }, (_, index) => entryAt(base + index, { id: String(index), type: "self_mute", enabled: index % 2 === 0, callStartedAt: base, guildId: "123456789012345678", guildName: "Friends", channelName: "general", username: "ana", displayName: "Ana", avatar: "a".repeat(32) }));
+    const chunk = encodeChunk(many);
+    assert.equal(chunk.users.length, 1);
+    assert.equal(chunk.channels.length, 1);
+    assert.equal(chunk.calls.length, 1);
+    assert.ok(chunk.time instanceof Float64Array && chunk.kind instanceof Uint8Array, "Columns must clone as raw memory");
+}
+
+// Opening Discord must not read anything: that read was the freeze.
+{
+    const { storage, counts } = countingStorage();
+    const seed = openStore(storage);
+    seed.open("me");
+    for (let index = 0; index < 1200; index++) seed.add(entryAt(Date.now() + index, { id: `e${index}` }));
+    await seed.flush();
+
+    const baseline = { ...counts };
+    const store = openStore(storage);
+    await Promise.all([store.open("me"), store.open("me")]);
+    assert.deepEqual(counts, baseline, "Opening must not touch storage");
+
+    store.add(entryAt(Date.now(), { id: "next" }));
+    assert.deepEqual(counts, baseline, "Recording must not touch storage until the next save");
+}
+
+// A restart brings logs back through the page, split by day and into chunks of a fixed size.
 {
     const storage = memoryStorage();
     const first = openStore(storage);
-    await first.open("me");
-    first.add(entryAt(Date.now() - DAY_MS));
-    first.add(entryAt(Date.now()));
+    first.open("me");
+    first.add(entryAt(Date.now() - DAY_MS, { id: "yesterday" }));
+    for (let index = 0; index < CHUNK_SIZE + 1; index++) first.add(entryAt(Date.now() + index, { id: `t${index}` }));
     await first.flush();
-    assert.equal(storage.data.size, 2, "Each day must have its own record");
+    assert.equal(chunkKeys(storage).length, 3, "One chunk for yesterday and two for today");
+    assert.equal(new Set(chunkKeys(storage).map(key => key.split(":")[2])).size, 2, "Keys must carry the day");
 
     const second = openStore(storage);
-    await second.open("me");
-    assert.equal(second.getEntries().length, 2);
-    assert.ok(second.getEntries()[0].timestamp instanceof Date);
+    second.open("me");
+    const { entries, hasMore } = await second.page(FILTER, 2000);
+    assert.equal(entries.length, CHUNK_SIZE + 2);
+    assert.equal(hasMore, false);
+    assert.ok(entries[0].timestamp instanceof Date);
+    assert.ok(entries[0].timestamp > entries.at(-1).timestamp, "Newest first");
 }
 
-// Events recorded while saved logs are loading must neither be lost nor overwrite the saved day.
+// Saving must only write what's new, never the day again.
 {
-    const storage = memoryStorage();
+    const { storage, counts } = countingStorage();
+    const store = openStore(storage);
+    store.open("me");
+    store.add(entryAt(Date.now(), { id: "one" }));
+    await store.flush();
+    const written = counts.set;
+    const chunks = chunkKeys(storage).length;
+
+    store.add(entryAt(Date.now() + 1, { id: "two" }));
+    await store.flush();
+    assert.equal(counts.set, written + 1, "A new event must write one record");
+    assert.equal(chunkKeys(storage).length, chunks + 1);
+    await store.flush();
+    assert.equal(counts.set, written + 1, "Nothing new, nothing written");
+}
+
+// A page reads only as much as it shows.
+{
+    const { storage, counts } = countingStorage();
     const seed = openStore(storage);
-    await seed.open("me");
-    seed.add(entryAt(Date.now() - 1000, { id: "saved" }));
+    seed.open("me");
+    for (let index = 0; index < CHUNK_SIZE * 40; index++) seed.add(entryAt(Date.now() + index, { id: `e${index}` }));
     await seed.flush();
 
+    const store = openStore(storage);
+    store.open("me");
+    counts.getMany = 0;
+    const page = await store.page(FILTER, 200);
+    assert.equal(page.entries.length, 200);
+    assert.equal(page.hasMore, true);
+    assert.ok(counts.getMany <= 3, `One page took ${counts.getMany} reads`);
+
+    const rows = new Set((await store.page(FILTER, CHUNK_SIZE * 3)).entries.map(entry => entry.id));
+    assert.equal(rows.size, CHUNK_SIZE * 3, "Paging further must not repeat rows");
+}
+
+// Events that haven't been saved yet still show up, and a filter applies to them too.
+{
+    const storage = memoryStorage();
+    const store = openStore(storage);
+    store.open("me");
+    store.add(entryAt(Date.now(), { id: "saved", channelId: "c1", channelName: "general" }));
+    await store.flush();
+    store.add(entryAt(Date.now() + 1, { id: "live", channelId: "c2", channelName: "games" }));
+
+    assert.equal((await store.page(FILTER, 10)).entries.length, 2);
+    assert.equal((await store.page({ ...FILTER, channelId: "c2" }, 10)).entries.length, 1);
+    assert.deepEqual((await store.channels()).map(channel => channel.value).sort(), ["c1", "c2"]);
+}
+
+// Events before the account is known are kept, and written under it.
+{
+    const storage = memoryStorage();
     const store = openStore(storage);
     store.add(entryAt(Date.now(), { id: "early" }));
     await store.flush();
-    assert.equal(storage.data.values().next().value.length, 1, "Nothing may be written before the load");
-    await store.open("me");
-    assert.deepEqual(store.getEntries().map(entry => entry.id), ["saved", "early"]);
-    assert.equal([...storage.data.values()][0].length, 2, "The merged day must be saved");
-}
-
-// A failed load must never replace saved logs.
-{
-    const storage = memoryStorage();
-    const seed = openStore(storage);
-    await seed.open("me");
-    seed.add(entryAt(Date.now(), { id: "saved" }));
-    await seed.flush();
-
-    const errors = [];
-    storage.failReads = true;
-    const store = openStore(storage, 0, errors);
-    await store.open("me");
-    store.add(entryAt(Date.now() + 1, { id: "unsaved" }));
+    assert.equal(storage.data.size, 0, "Nothing may be written without an account");
+    store.open("me");
     await store.flush();
-    assert.equal(errors.length, 1);
-    assert.deepEqual([...storage.data.values()][0].map(entry => entry.id), ["saved"]);
+    assert.equal(chunkKeys(storage).length, 1);
+    assert.ok(chunkKeys(storage)[0].startsWith("v2:me:"));
 }
 
-// A save that fires in the middle of the load must wait, or it would replace the saved day.
-{
-    const storage = memoryStorage();
-    const seed = openStore(storage);
-    await seed.open("me");
-    seed.add(entryAt(Date.now() - 1000, { id: "saved" }));
-    await seed.flush();
-
-    let finishLoad;
-    const { getMany } = storage;
-    storage.getMany = async function (keys) {
-        await new Promise(resolve => { finishLoad = resolve; });
-        return getMany.call(this, keys);
-    };
-
-    const store = openStore(storage);
-    const opening = store.open("me");
-    while (!finishLoad) await new Promise(resolve => setTimeout(resolve, 0));
-
-    store.add(entryAt(Date.now(), { id: "during-load" }));
-    await store.flush();
-    assert.deepEqual([...storage.data.values()][0].map(entry => entry.id), ["saved"], "Nothing may be written during the load");
-
-    finishLoad();
-    await opening;
-    assert.deepEqual([...storage.data.values()][0].map(entry => entry.id), ["saved", "during-load"]);
-}
-
-// A failed write must be retried.
+// A failed write must keep the events and try again.
 {
     const storage = memoryStorage();
     const errors = [];
-    const store = openStore(storage, 0, errors);
-    await store.open("me");
+    const store = openStore(storage, { onError: message => errors.push(message) });
+    store.open("me");
     storage.failWrites = true;
-    store.add(entryAt(Date.now()));
+    store.add(entryAt(Date.now(), { id: "kept" }));
     await store.flush();
-    assert.equal(storage.data.size, 0);
     assert.equal(errors.length, 1);
+    assert.equal((await store.page(FILTER, 10)).entries.length, 1, "A failed write must not hide the event");
     storage.failWrites = false;
     await store.flush();
-    assert.equal(storage.data.size, 1);
+    assert.equal(chunkKeys(storage).length, 1);
+    assert.equal((await store.page(FILTER, 10)).entries.length, 1, "Retrying must not duplicate it");
+}
+
+// With saving off nothing is written, and memory can't grow forever.
+{
+    const storage = memoryStorage();
+    const store = openStore(storage, { shouldPersist: () => false });
+    store.open("me");
+    for (let index = 0; index < 6000; index++) store.add(entryAt(Date.now() + index, { id: `e${index}` }));
+    await store.flush();
+    assert.equal(storage.data.size, 0);
+    assert.equal((await store.page(FILTER, 10000)).entries.length, 5000);
+}
+
+// Accounts stay separate.
+{
+    const storage = memoryStorage();
+    const store = openStore(storage);
+    store.open("me");
+    store.add(entryAt(Date.now(), { id: "mine" }));
+    store.open("other");
+    await store.flush();
+    assert.equal((await store.page(FILTER, 10)).entries.length, 0, "Another account must not see these logs");
+    store.open("me");
+    assert.equal((await store.page(FILTER, 10)).entries.length, 1);
+}
+
+// Clearing one channel keeps the rest of the chunk; clearing everything leaves nothing to come back.
+{
+    const storage = memoryStorage();
+    const store = openStore(storage);
+    store.open("me");
+    store.add(entryAt(Date.now(), { id: "one", channelId: "c1" }));
+    store.add(entryAt(Date.now() + 1, { id: "two", channelId: "c2" }));
+    await store.flush();
+
+    await store.clear("c1");
+    assert.deepEqual((await store.page(FILTER, 10)).entries.map(entry => entry.channelId), ["c2"]);
+    assert.deepEqual((await store.channels()).map(channel => channel.value), ["c2"]);
+
+    storage.data.set("me:2020-01-01", [entryAt(1, { id: "legacy" })]);
+    await store.clear();
+    assert.equal((await store.page(FILTER, 10)).entries.length, 0);
+    assert.equal([...storage.data.keys()].filter(key => key.includes("me:")).length, 0, "Clear all must remove old records too");
 }
 
 // Retention removes old days, and 0 keeps everything.
 {
     const storage = memoryStorage();
     const seed = openStore(storage);
-    await seed.open("me");
+    seed.open("me");
     seed.add(entryAt(Date.now() - 100 * DAY_MS, { id: "old" }));
     seed.add(entryAt(Date.now(), { id: "recent" }));
     await seed.flush();
 
-    const keepAll = openStore(storage, 0);
-    await keepAll.open("me");
-    assert.equal(keepAll.getEntries().length, 2);
+    await seed.prune();
+    assert.equal(chunkKeys(storage).length, 2);
 
-    const limited = openStore(storage, 90);
-    await limited.open("me");
-    assert.deepEqual(limited.getEntries().map(entry => entry.id), ["recent"]);
-    assert.equal(storage.data.size, 1, "Expired days must be deleted");
+    const limited = openStore(storage, { retentionDays: () => 90 });
+    limited.open("me");
+    await limited.prune();
+    assert.equal(chunkKeys(storage).length, 1, "Expired days must be deleted");
 }
 
-// Accounts stay separate, and clearing removes the record even when saving is off.
+// Migration: the duplicated history collapses, in order, and the original stays untouched.
 {
     const storage = memoryStorage();
+    const now = Date.now();
+    const day = getDayKey(new Date(now));
+    const unique = Array.from({ length: CHUNK_SIZE + 10 }, (_, index) => ({ ...entryAt(now + index, { id: `e${index}`, channelName: "general" }), timestamp: new Date(now + index).toISOString() }));
+    const duplicated = [...unique, ...unique, ...unique];
+    storage.data.set(`me:${day}`, duplicated);
+    storage.data.set("archive:me", { at: 1, day });
+
+    const archived = new Map();
+    const store = openStore(storage, { writeDay: async (account, archiveDay, content) => archived.set(`${account}/${archiveDay}`, content) });
+    store.open("me");
+    assert.equal(chunkKeys(storage).length, 0, "Opening must not migrate: only the log window may wait for it");
+
+    const { entries } = await store.page(FILTER, 5);
+    assert.equal(entries[0].id.length > 0, true);
+    assert.equal(entries[0].timestamp.getTime(), now + unique.length - 1, "Newest first after migrating");
+    assert.equal((await store.page(FILTER, CHUNK_SIZE * 2)).entries.length, unique.length, "Copies must be gone");
+    assert.equal(storage.data.get(`me:${day}`).length, duplicated.length, "The original stays as a backup");
+    assert.equal(archived.get(`me/${day}`).trim().split("\n").length, unique.length, "The archive gets the clean day");
+    assert.deepEqual((await store.channels()).map(channel => channel.value), ["c1"]);
+
+    // Interrupted or repeated, it must not run twice.
+    const chunks = chunkKeys(storage).length;
+    const again = openStore(storage);
+    again.open("me");
+    await again.page(FILTER, 5);
+    assert.equal(chunkKeys(storage).length, chunks);
+    assert.equal(storage.data.get("v2-meta:me").before, duplicated.length);
+    assert.equal(storage.data.get("v2-meta:me").after, unique.length);
+}
+
+// A broken record must not stop a migration.
+{
+    assert.equal(reviveEntry(null), null);
+    assert.equal(reviveEntry({ type: "join" }), null);
+    const storage = memoryStorage();
+    storage.data.set("me:2026-01-01", [null, { type: "join" }, "text", entryAt(Date.parse("2026-01-01T12:00:00"), { id: "good" })]);
+    storage.data.set("me:not-a-day", [entryAt(1, { id: "ignored" })]);
     const store = openStore(storage);
-    await store.open("me");
-    store.add(entryAt(Date.now(), { id: "first", channelId: "c1" }));
-    store.add(entryAt(Date.now(), { id: "second", channelId: "c2" }));
+    store.open("me");
+    assert.deepEqual((await store.page(FILTER, 10)).entries.map(entry => entry.userId), ["u1"]);
+    assert.equal((await store.page(FILTER, 10)).entries.length, 1);
+}
+
+// A failed read reports the error and changes nothing.
+{
+    const storage = memoryStorage();
+    const seed = openStore(storage);
+    seed.open("me");
+    seed.add(entryAt(Date.now(), { id: "saved" }));
+    await seed.flush();
+    const before = [...storage.data.keys()];
+
+    storage.failReads = true;
+    const store = openStore(storage);
+    store.open("me");
+    await assert.rejects(store.page(FILTER, 10));
+    assert.deepEqual([...storage.data.keys()], before);
+}
+
+// Saving new events writes them to the archive without rereading anything.
+{
+    const { storage, counts } = countingStorage();
+    const appended = [];
+    const store = openStore(storage, { appendDay: async (account, day, content) => appended.push([account, day, content]) });
+    store.open("me");
+    store.add(entryAt(Date.now(), { id: "one" }));
+    store.add(entryAt(Date.now() + 1, { id: "two" }));
     await store.flush();
-    await store.open("other");
-    assert.equal(store.getEntries().length, 0, "Another account must not see these logs");
-    await store.open("me");
-    assert.equal(store.getEntries().length, 2);
-
-    await store.clear("c1");
-    assert.deepEqual(store.getEntries().map(entry => entry.channelId), ["c2"]);
-    await store.clear();
-    assert.equal(store.getEntries().length, 0);
-    assert.equal([...storage.data.keys()].filter(key => key.startsWith("me:")).length, 0);
-
-    const off = createHistoryStore(storage, { shouldPersist: () => false, retentionDays: () => 0, onError() {} });
-    await off.open("other");
-    off.add(entryAt(Date.now()));
-    await off.flush();
-    assert.equal(storage.data.size, 0, "Saving off must not write");
+    assert.equal(appended.length, 1);
+    assert.equal(appended[0][2].trim().split("\n").length, 2);
+    assert.equal(JSON.parse(appended[0][2].split("\n")[0]).id, "one");
+    assert.equal(counts.keys, 0, "Appending must not list storage");
 }
 
 // Plugin start and CONNECTION_OPEN both open the history. Six restarts turned 100 logs into 6463.
@@ -318,7 +483,6 @@ const DAY_MS = 86_400_000;
     assert.deepEqual(ids({ group: "voice" }), ["2"]);
     assert.deepEqual(ids({ query: "  BOB " }), ["3", "2"]);
     assert.deepEqual(ids({ query: "screensharing" }), ["3"]);
-    assert.deepEqual(listChannels(entries).map(channel => channel.label), ["#games · Friends", "#general · Friends"]);
 
     assert.equal(getDayKey(new Date(2026, 0, 5, 23, 59)), "2026-01-05");
     assert.equal(describeEntry(entryAt(1, { type: "move", channelId: "a", oldChannelId: "a", newChannelId: "b", newChannelName: "lobby" })), "Moved to #lobby");
@@ -371,7 +535,7 @@ const plugin = (await load("index.tsx", {
     VoiceStateStore: { getVoiceStatesForChannel: id => state.voice[id] ?? {} }
 })).default;
 
-const logs = () => [...state.storage.values()].flat();
+const logs = () => [...state.storage].filter(([key]) => key.startsWith("v2:")).flatMap(([key, chunk]) => decodeChunk(chunk, key));
 const update = (userId, overrides) => plugin.flux.VOICE_STATE_UPDATES({ voiceStates: [voiceState({ userId, ...overrides })] });
 const rows = () => logs().map(entry => `${entry.userId}:${entry.type}${entry.enabled === undefined ? "" : `=${entry.enabled}`}@${entry.channelId}`);
 const select = (channelId, currentVoiceChannelId) => {

@@ -18,7 +18,7 @@ const LOGS = join(homedir(), "Documents", "Equicord Logs");
 
 const USER_PLUGINS = ["activityTracker", "clientModDetector", "fakeDeafen", "fakeMedia", "goLiveBypass", "lastMessageDate", "voiceFakeDetector"];
 const EDITED_PLUGINS = ["toastNotifications", "voiceChannelLog"];
-const TESTS = ["testActivityTracker.mjs", "testGoLive.mjs", "testToastVoiceTracking.mjs", "testUserplugins.mjs", "testVoiceChannelHistory.mjs"];
+const TESTS = ["benchVoiceChannelLog.mjs", "testActivityTracker.mjs", "testGoLive.mjs", "testToastVoiceTracking.mjs", "testUserplugins.mjs", "testVoiceChannelHistory.mjs"];
 
 const LAST_ONLINE_COMMIT = "493727b2b3d048dd28fe2cab5921117621ac8b92";
 const LAST_ONLINE_URL = `https://raw.githubusercontent.com/k1ng0p/LastOnlineTracker/${LAST_ONLINE_COMMIT}/index.tsx`;

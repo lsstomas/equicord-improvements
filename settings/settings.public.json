@@ -993,7 +993,7 @@
             "enabled": false
         },
         "MessagePeek": {
-            "enabled": true,
+            "enabled": false,
             "hideMuted": true
         },
         "MessagePopoverAPI": {

@@ -9,13 +9,15 @@ import { classes } from "@utils/misc";
 import { Channel, RenderModalProps } from "@vencord/discord-types";
 import { AccessibilityStore, Alerts, Modal, openModal, React, ScrollerThin, Select, TextInput } from "@webpack/common";
 
-import { EVENT_GROUPS, EventGroup, filterEntries, listChannels } from "../history";
-import { clearLogs, getVcLogs, vcLogSubscribe } from "../logs";
+import { EVENT_GROUPS, EventGroup } from "../history";
+import { clearLogs, getVcLogVersion, readLogChannels, readLogPage, releaseLogs, vcLogSubscribe } from "../logs";
+import { VoiceChannelLogEntry } from "../types";
 import { cl, exportLogs } from "../utils";
 import { VoiceChannelLogEntryComponent } from "./VoiceChannelLogEntryComponent";
 
 const ALL_CHANNELS = "all";
 const PAGE_SIZE = 200;
+const SEARCH_DELAY_MS = 200;
 
 export function openVoiceChannelLog(channel?: Channel) {
     return openModal(props => (
@@ -24,29 +26,58 @@ export function openVoiceChannelLog(channel?: Channel) {
 }
 
 export function VoiceChannelLogModal({ channel, props }: { channel?: Channel; props: RenderModalProps; }) {
-    const logs = React.useSyncExternalStore(vcLogSubscribe, getVcLogs);
+    const version = React.useSyncExternalStore(vcLogSubscribe, getVcLogVersion);
 
     const [scope, setScope] = React.useState(channel?.id ?? ALL_CHANNELS);
     const [group, setGroup] = React.useState<EventGroup>("all");
     const [query, setQuery] = React.useState("");
     const [limit, setLimit] = React.useState(PAGE_SIZE);
+    const [visible, setVisible] = React.useState<VoiceChannelLogEntry[]>([]);
+    const [hasMore, setHasMore] = React.useState(false);
+    const [loading, setLoading] = React.useState(true);
+    const [failed, setFailed] = React.useState(false);
+    const [channels, setChannels] = React.useState<{ label: string; value: string; }[]>([]);
 
     const channelId = scope === ALL_CHANNELS ? null : scope;
 
-    const matching = React.useMemo(
-        () => filterEntries(logs, { channelId, group, query }),
-        [logs, channelId, group, query]
-    );
+    React.useEffect(() => releaseLogs, []);
+
+    React.useEffect(() => {
+        let current = true;
+        setLoading(true);
+
+        // A busca espera a digitação parar, porque pode percorrer o histórico inteiro.
+        const timer = setTimeout(() => {
+            readLogPage({ channelId, group, query }, limit)
+                .then(page => {
+                    if (!current) return;
+                    setVisible(page.entries);
+                    setHasMore(page.hasMore);
+                    setFailed(false);
+                })
+                .catch(() => { if (current) setFailed(true); })
+                .finally(() => { if (current) setLoading(false); });
+        }, query ? SEARCH_DELAY_MS : 0);
+
+        return () => {
+            current = false;
+            clearTimeout(timer);
+        };
+    }, [version, channelId, group, query, limit]);
+
+    React.useEffect(() => {
+        let current = true;
+        readLogChannels().then(list => { if (current) setChannels(list); }).catch(() => { });
+        return () => { current = false; };
+    }, [version]);
 
     const channelOptions = React.useMemo(() => {
-        const channels = listChannels(logs);
-        if (channel && !channels.some(option => option.value === channel.id)) {
-            channels.push({ label: channel.name || "This call", value: channel.id });
+        const options = [...channels];
+        if (channel && !options.some(option => option.value === channel.id)) {
+            options.push({ label: channel.name || "This call", value: channel.id });
         }
-        return [{ label: "All channels", value: ALL_CHANNELS }, ...channels];
-    }, [logs, channel]);
-
-    const visible = matching.slice(0, limit);
+        return [{ label: "All channels", value: ALL_CHANNELS }, ...options];
+    }, [channels, channel]);
 
     function changeFilter<T>(setFilter: (value: T) => void) {
         return (value: T) => {
@@ -81,13 +112,13 @@ export function VoiceChannelLogModal({ channel, props }: { channel?: Channel; pr
                 {
                     text: "Export JSON",
                     variant: "secondary",
-                    disabled: !matching.length,
-                    onClick: () => exportLogs(matching)
+                    disabled: !visible.length,
+                    onClick: () => void exportLogs({ channelId, group, query })
                 },
                 {
                     text: channelId ? "Clear channel logs" : "Clear all logs",
                     variant: "dangerPrimary",
-                    disabled: !logs.length,
+                    disabled: !visible.length,
                     onClick: confirmClear
                 }
             ]}
@@ -112,7 +143,7 @@ export function VoiceChannelLogModal({ channel, props }: { channel?: Channel; pr
                 />
             </div>
             <div className={cl("count")}>
-                {matching.length === 1 ? "1 event" : `${matching.length} events`}
+                {failed ? "Couldn't read the logs" : loading && !visible.length ? "Loading…" : `${visible.length}${hasMore ? "+" : ""} ${visible.length === 1 ? "event" : "events"}`}
             </div>
             <ScrollerThin fade className={classes(cl("scroller"), `group-spacing-${AccessibilityStore.messageGroupSpacing}`)}>
                 {visible.length > 0 ? visible.map((entry, i) => {
@@ -129,9 +160,9 @@ export function VoiceChannelLogModal({ channel, props }: { channel?: Channel; pr
                         </React.Fragment>
                     );
                 }) : (
-                    <div className={cl("empty")}>No logs to display.</div>
+                    <div className={cl("empty")}>{loading ? "Loading…" : "No logs to display."}</div>
                 )}
-                {matching.length > visible.length && (
+                {hasMore && (
                     <div className={cl("load-more")}>
                         <Button size="small" variant="secondary" onClick={() => setLimit(limit + PAGE_SIZE)}>
                             Load older logs

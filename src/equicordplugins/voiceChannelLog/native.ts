@@ -6,8 +6,12 @@
 
 import { IpcMainInvokeEvent } from "electron";
 
-import { writeArchiveDay } from "./archiveFile";
+import { appendArchiveDay, writeArchiveDay } from "./archiveFile";
 
 export function writeArchive(_: IpcMainInvokeEvent, accountId: string, day: string, content: string) {
     return writeArchiveDay("VoiceChannelLog", accountId, day, content);
+}
+
+export function appendArchive(_: IpcMainInvokeEvent, accountId: string, day: string, content: string) {
+    return appendArchiveDay("VoiceChannelLog", accountId, day, content);
 }
