@@ -12,6 +12,7 @@ import type { RenderModalProps } from "@vencord/discord-types";
 import { Modal, React, TextInput, useState } from "@webpack/common";
 import type { ReactNode, RefObject } from "react";
 
+import type { GoLiveStatus } from "./go-live";
 import {
     formatProtonRoutePing,
     isProtonRouteSelectable,
@@ -30,13 +31,14 @@ type PanelTab = "route" | "account" | "advanced";
 export interface PanelStatus {
     state: string;
     active: boolean;
+    platform?: string;
     requiresRelaunch?: boolean;
-    appsOutdated?: boolean;
     sessionStorage?: string;
     externalReason: string | null;
     dependencies?: string[];
     lastDiagnostic: { detail: string; ok?: boolean; } | null;
     route?: VpnRouteInfo | null;
+    goLive?: GoLiveStatus | null;
 }
 
 export interface PanelSession {
@@ -74,6 +76,7 @@ export interface ControlPanelController {
     activationBlockReason: string | null;
     canActivate: boolean;
     goLiveBlocked: boolean;
+    needsReconnect: boolean;
     setUsername(value: string): void;
     setPassword(value: string): void;
     setTwoFactorCode(value: string): void;
@@ -83,7 +86,8 @@ export interface ControlPanelController {
     setProtonAutoPing(value: boolean): void;
     refresh(): Promise<void>;
     activate(): void;
-    deactivate(): void;
+    goLive(): void;
+    turnOffGoLive(): void;
     reconnect(): void;
     restartClient(): void;
     restoreNetwork(): void;
@@ -108,9 +112,11 @@ const BUSY_TITLES: Record<string, string> = {
     restart_pending: "Restart Discord to finish",
 };
 
-export function panelTone(status: Pick<PanelStatus, "state" | "active" | "requiresRelaunch" | "appsOutdated"> | null): PanelTone {
+export function panelTone(status: Pick<PanelStatus, "state" | "active" | "requiresRelaunch" | "goLive"> | null): PanelTone {
     if (!status) return "off";
-    if (status.requiresRelaunch || status.appsOutdated) return "alert";
+    if (status.requiresRelaunch) return "alert";
+    if (status.goLive?.state === "fallback") return "alert";
+    if (status.goLive?.state === "starting") return "busy";
     if (status.active || status.state === "active") return "on";
     if (status.state in BUSY_TITLES) return "busy";
     if (status.state === "blocked_external" || status.state === "dependency_missing" || status.state === "recovery_required") return "alert";
@@ -137,8 +143,8 @@ export function panelIconFor(tone: PanelTone) {
 }
 
 export const PANEL_TONE_LABEL: Record<PanelTone, string> = {
-    on: "on",
-    off: "off",
+    on: "ready",
+    off: "idle",
     busy: "working",
     alert: "needs attention",
 };
@@ -174,20 +180,24 @@ function formatExpiry(value?: string): string | null {
 }
 
 function heroCopy(controller: ControlPanelController, tone: PanelTone) {
-    const { status, session, customMode, customConfigPath } = controller;
+    const { status, session, customMode, customConfigPath, needsReconnect } = controller;
     const route = formatVpnRouteSummary(status?.route ?? null);
+    const goLive = status?.goLive;
 
     if (!status) return { title: "Checking…", detail: "Reading the tunnel state." };
-    if (status.appsOutdated) return { title: "Discord was updated", detail: "The tunnel still points to the old version, so Discord is outside it. Reconnect to fix this." };
     if (status.requiresRelaunch) return { title: "Restart Discord", detail: "The tunnel is ready, but this Discord is still outside it." };
-    if (tone === "on") return { title: "Bypass is on", detail: route ? `Connected through ${route}` : "Discord is going through the tunnel." };
+    if (needsReconnect) return { title: "Reconnect Discord", detail: "Go Live is on, but this session started without it." };
+    if (goLive?.state === "active") return { title: "Go Live is on", detail: `Video and the gateway exit in ${goLive.country ?? "another country"}. Everything else stays direct.` };
+    if (goLive?.state === "starting") return { title: "Turning on…", detail: route ? `Route ${route}` : "One moment." };
+    if (goLive?.state === "fallback") return { title: "Go Live has no route", detail: goLive.error ?? "Discord stays on your normal network." };
+    if (tone === "on") return { title: "Ready for Go Live", detail: "Join a call and start your screen or camera." };
     if (tone === "busy") return { title: BUSY_TITLES[status.state], detail: route ? `Route ${route}` : "One moment." };
     if (status.state === "recovery_required") return { title: "Needs attention", detail: "The last cleanup wasn't confirmed. Restore the network before turning it on again." };
     if (status.state === "blocked_external") return { title: "Another tunnel is running", detail: status.externalReason || "The plugin won't take over a tunnel it didn't start." };
     if (status.state === "dependency_missing") return { title: "Missing components", detail: status.dependencies?.join(", ") || status.externalReason || "Network dependencies weren't found." };
-    if (customMode) return { title: "Bypass is off", detail: customConfigPath.trim() ? "Your .conf file is ready." : "Choose a .conf file to continue." };
-    if (session && !session.valid) return { title: "Bypass is off", detail: "Sign in to Proton to continue." };
-    return { title: "Bypass is off", detail: route ? `Ready: ${route}` : "Prepare a route to turn it on." };
+    if (customMode) return { title: "Go Live is off", detail: customConfigPath.trim() ? "Your .conf file is ready." : "Choose a .conf file to continue." };
+    if (session && !session.valid) return { title: "Go Live is off", detail: "Sign in to Proton to continue." };
+    return { title: "Go Live is off", detail: route ? `Route: ${route}` : "Choose a route to continue." };
 }
 
 function PrimaryAction({ controller, openTab }: { controller: ControlPanelController; openTab(tab: PanelTab): void; }) {
@@ -196,16 +206,18 @@ function PrimaryAction({ controller, openTab }: { controller: ControlPanelContro
     const className = "vc-glb-cta";
 
     if (!status) return <Button className={className} disabled>Checking…</Button>;
-    if (status.appsOutdated) return <Button className={className} onClick={controller.reconnect} disabled={locked}>{busy ? "Reconnecting…" : "Reconnect bypass"}</Button>;
-    if (status.active) return <Button className={className} variant="dangerSecondary" onClick={controller.deactivate} disabled={locked}>{busy ? "Turning off…" : "Turn off bypass"}</Button>;
+    if (status.goLive && controller.needsReconnect) return <Button className={className} onClick={controller.reconnect}>Reconnect</Button>;
+    if (status.goLive?.state === "starting") return <Button className={className} disabled>Turning on…</Button>;
+    if (status.goLive?.state === "active" || status.goLive?.state === "fallback") return <Button className={className} variant="dangerSecondary" onClick={controller.turnOffGoLive} disabled={locked}>{busy ? "Turning off…" : "Turn off"}</Button>;
+    if (status.active) return <Button className={className} variant="dangerSecondary" onClick={controller.restoreNetwork} disabled={locked}>{busy ? "Turning off…" : "Turn off tunnel"}</Button>;
     if (status.requiresRelaunch || status.state === "restart_pending") return <Button className={className} onClick={controller.restartClient} disabled={locked}>Restart Discord</Button>;
     if (status.state === "recovery_required") return <Button className={className} variant="dangerPrimary" onClick={controller.restoreNetwork} disabled={locked}>Restore network</Button>;
     if (customMode && !customConfigPath.trim()) return <Button className={className} onClick={controller.selectCustomConfig} disabled={locked}>Choose a .conf file</Button>;
     if (!customMode && session && !session.valid) return <Button className={className} onClick={() => openTab("account")}>Sign in to Proton</Button>;
     if (!customMode && session?.valid && !status.route?.endpoint) return <Button className={className} onClick={controller.optimize} disabled={locked}>{optimizing ? "Preparing the route…" : "Prepare the best route"}</Button>;
     return (
-        <Button className={className} variant="positive" onClick={controller.activate} disabled={!controller.canActivate} title={controller.activationBlockReason ?? undefined}>
-            {busy ? "Turning on…" : "Turn on bypass"}
+        <Button className={className} variant="positive" onClick={status.goLive ? controller.goLive : controller.activate} disabled={!controller.canActivate} title={controller.activationBlockReason ?? undefined}>
+            {busy ? "Turning on…" : "Go Live"}
         </Button>
     );
 }
@@ -213,9 +225,16 @@ function PrimaryAction({ controller, openTab }: { controller: ControlPanelContro
 function Hero({ controller, openTab }: { controller: ControlPanelController; openTab(tab: PanelTab): void; }) {
     const tone = panelTone(controller.status);
     const { title, detail } = heroCopy(controller, tone);
-    const hint = controller.status?.active
-        ? "Only Discord goes through the tunnel. It stays on after you close Discord or restart your PC, until you turn it off here."
-        : "Turning it on restarts Discord and leaves your call. Windows asks for permission the first time.";
+    const goLive = controller.status?.goLive;
+    const hint = goLive
+        ? goLive.state === "unavailable" && goLive.error
+            ? goLive.error
+            : goLive.state === "off"
+                ? "Stays on every time Discord opens. Turning it off needs no restart. Camera and screen buttons work either way."
+                : "Calls go through the route while this is on, so voice can lag a bit more. Only Discord's gateway and media use it."
+        : controller.status?.active
+            ? "Only Discord uses the tunnel."
+            : "Turning this on restarts Discord through the tunnel.";
 
     return (
         <section className={`vc-glb-hero vc-glb-hero-${tone}`} aria-label="Bypass status">
@@ -258,13 +277,15 @@ function Checks({ controller }: { controller: ControlPanelController; }) {
                 <Button variant="secondary" size="small" onClick={() => void verify()} disabled={checking}>{checking ? "Checking…" : "Check now"}</Button>
             </header>
             <ul className="vc-glb-checks">
-                <CheckRow tone={tone === "on" ? "ok" : tone === "alert" ? "warn" : "idle"} label="Tunnel" value={tone === "on" ? "On for Discord only" : tone === "busy" ? "Working" : tone === "alert" ? "Needs attention" : "Off"} />
+                <CheckRow tone={tone === "on" ? "ok" : tone === "alert" ? "warn" : "idle"} label="Tunnel" value={tone === "on" ? "On for Discord's gateway and media" : tone === "busy" ? "Working" : tone === "alert" ? "Needs attention" : "Off"} />
                 {customMode
                     ? <CheckRow tone={customConfigPath.trim() ? "ok" : "warn"} label="Profile" value={customConfigPath.trim() ? ".conf file imported" : "No file selected"} />
                     : <CheckRow tone={session?.valid ? "ok" : session ? "warn" : "idle"} label="Proton account" value={session?.valid ? `Signed in${expiry ? ` · ${expiry}` : ""}` : session ? (controller.sessionTitle ?? "Session invalid") : "Checking…"} />}
                 <CheckRow tone={route ? "ok" : "warn"} label="Route" value={route ?? "None prepared"} />
                 <CheckRow tone={goLiveBlocked ? "warn" : "ok"} label="Go Live" value={goLiveBlocked ? "Blocked by the server this session" : "Not blocked this session"} />
-                <CheckRow tone={!diagnostic ? "idle" : diagnostic.ok === false ? "warn" : "ok"} label="Tunnel link" value={!diagnostic ? "Not measured yet" : diagnostic.ok === false ? diagnostic.detail : "Responding"} />
+                {status?.goLive
+                    ? <CheckRow tone={status.goLive.country ? "ok" : status.goLive.state === "off" ? "idle" : "warn"} label="Exit" value={status.goLive.country ? `${status.goLive.country}${status.goLive.latencyMs === null ? "" : ` · ${status.goLive.latencyMs} ms`}` : status.goLive.state === "off" ? "Not in use" : "Not responding"} />
+                    : <CheckRow tone={!diagnostic ? "idle" : diagnostic.ok === false ? "warn" : "ok"} label="Tunnel link" value={!diagnostic ? "Not measured yet" : diagnostic.ok === false ? diagnostic.detail : "Responding"} />}
             </ul>
             <p className="vc-glb-hint">
                 {checkedAt ? `Checked at ${checkedAt}. ` : ""}This shows the tunnel is running. The real test is starting Go Live in a call.
@@ -277,6 +298,7 @@ function RouteRow({ candidate, controller, recommended, discoveryActive }: { can
     const selectable = isProtonRouteSelectable(candidate);
     const applying = controller.applyingServer === candidate.server;
     const inUse = controller.status?.route?.server === candidate.server;
+    const running = controller.status?.active || controller.status?.goLive?.state === "active";
     const exclusive = controller.optimizing || controller.discoveryActive || controller.applyingServer !== null;
     const stateLabel = protonRouteStateLabel(candidate, { discoveryActive });
     const location = protonRouteLocation(candidate);
@@ -293,7 +315,7 @@ function RouteRow({ candidate, controller, recommended, discoveryActive }: { can
             </div>
             <span className="vc-glb-route-ping">{formatProtonRoutePing(candidate.pingMs)}</span>
             {inUse && !applying
-                ? <span className="vc-glb-tag vc-glb-tag-on">{controller.status?.active ? "In use" : "Ready"}</span>
+                ? <span className="vc-glb-tag vc-glb-tag-on">{running ? "In use" : "Ready"}</span>
                 : (
                     <Button
                         variant="secondary"
@@ -344,7 +366,7 @@ function RouteTab({ controller, openTab }: { controller: ControlPanelController;
             <div className="vc-glb-auto">
                 <div>
                     <strong>Automatic route</strong>
-                    <p>{controller.status?.active ? "Tests routes and keeps the best one. The bypass goes off during the test, about 2 minutes, and you may drop from your call." : "Tests routes and keeps the best one."}</p>
+                    <p>{controller.status?.active ? "Tests routes and keeps the best one. The tunnel goes off during the test, about 2 minutes." : "Tests routes and keeps the best one."}</p>
                 </div>
                 <Button onClick={controller.optimize} disabled={exclusive}>{optimizing ? "Testing…" : "Optimize"}</Button>
             </div>
@@ -476,7 +498,7 @@ function AdvancedTab({ controller, regions, updates }: { controller: ControlPane
             </div>
             <div className="vc-glb-group">
                 <h4>Troubleshooting</h4>
-                <p className="vc-glb-hint">Use Restore network if the bypass won't turn off or your internet stops after turning it on.</p>
+                <p className="vc-glb-hint">Use Restore network if the tunnel won't turn off or Discord stops connecting.</p>
                 <div className="vc-glb-row">
                     <Button variant="dangerSecondary" size="small" onClick={controller.restoreNetwork} disabled={locked}>Restore network</Button>
                     <Button variant="secondary" size="small" onClick={controller.copyDiagnostic}>Copy diagnostics</Button>

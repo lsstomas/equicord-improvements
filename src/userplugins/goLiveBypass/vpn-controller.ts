@@ -207,10 +207,10 @@ function isUnknownWireSockInspection(inspection: windows.WireSockInspection): bo
 }
 
 function unknownWireSockMessage(inspection: windows.WireSockInspection): string {
-    const reason = safeDiagnosticDetail(inspection.reason || "Não foi possível confirmar o estado do WireSock; estado desconhecido.", 300);
+    const reason = safeDiagnosticDetail(inspection.reason || "Couldn't confirm the WireSock state, so it's unknown.", 300);
     // Restaurar rede é a ação manual do usuário e executa a limpeza mesmo sem
     // ownership comprovado (#306); as ações automáticas continuam fail-closed.
-    return `${reason} Use Restaurar rede: a limpeza manual segue mesmo sem ownership comprovado; nenhuma ação automática interrompe uma VPN sem prova de ownership.`;
+    return `${reason} Use Restore network: manual cleanup runs even without proven ownership. No automatic action stops a VPN without proof of ownership.`;
 }
 
 function processAlive(pid: number): boolean {
@@ -233,7 +233,7 @@ function normalizeLoginRequestId(value: unknown): string {
 }
 
 function cancelledLoginResult(): proton.ProtonLoginResult {
-    const message = "O login Proton foi cancelado.";
+    const message = "Proton sign-in was cancelled.";
     return { success: false, code: "CANCELLED", message, error: message, retryable: true };
 }
 
@@ -388,7 +388,6 @@ export class PluginVpnController {
     private restarting = false;
     private initialized = false;
     private automaticBootSuppressed = false;
-    private appsOutdated = false;
     private optimization: { id: string; controller: AbortController } | null = null;
     private protonLogin: { id: string; controller: AbortController } | null = null;
     private routeMeasurement: ProtonRouteMeasurement | null = null;
@@ -397,6 +396,7 @@ export class PluginVpnController {
     private routeProbeFlights = new Set<Promise<void>>();
     private ownershipToken: OwnershipToken | null = null;
     private diagnosticGeneration = 0;
+    private goLiveAllowedIps: string | null = null;
 
     public constructor(options: PluginVpnControllerOptions) {
         this.options = options;
@@ -427,32 +427,88 @@ export class PluginVpnController {
         return this.automaticBootSuppressed;
     }
 
-    // No Windows o serviço filtra por aplicativo e não depende deste processo: mantê-lo ligado
-    // deixa o Discord nascer dentro do túnel na próxima abertura, sem UAC nem relaunch. No
-    // Linux a namespace pertence ao processo, então o fechamento continua limpando.
-    public shouldKeepTunnelOnQuit(): boolean {
-        return isWindows() && this.state === "active";
+    // A partir daqui o túnel só leva o que está em `allowedIps`, inclusive quando uma troca de
+    // rota no painel o religar.
+    public startGoLiveTunnel(allowedIps: string): Promise<VpnOperationResult> {
+        this.automaticBootSuppressed = false;
+        this.goLiveAllowedIps = allowedIps;
+        return this.serial(() => this.startInternal(false));
     }
 
-    // O processo principal está no AllowedApps, então esta consulta passa pelo túnel. Roda fora
-    // do renderer porque um túnel morto pode impedir a interface do Discord de carregar.
-    public async tunnelResponds(): Promise<boolean> {
-        if (!isWindows() || this.state !== "active") return true;
-        for (let attempt = 0; attempt < 2; attempt++) {
-            if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 5_000));
-            if ((await windows.diagnoseWindowsNetwork(this.options.log)).httpsOk) return true;
-        }
-        return false;
+    // Grava o lock de dono antes de ligar: com ele, a verificação do boot adota este túnel em vez
+    // de tratá-lo como órfão. Lock existente significa que a última sessão não fechou limpa.
+    public fastStartGoLiveTunnel(allowedIps: string): Promise<boolean> {
+        return this.serial(async () => {
+            if (!isWindows() || this.state !== "inactive" || fs.existsSync(this.ownerPath)) return false;
+            const raw = this.fastStartProfile();
+            if (raw === null || !await windows.canFastStartWireSock(this.serviceConfigPath)) return false;
+
+            const owner = await this.acquireOwnership(windows.INACTIVE_WIRESOCK_INSPECTION);
+            this.goLiveAllowedIps = allowedIps;
+            if (await windows.fastStartWireSock(this.serviceConfigPath, raw, this.discordAllowedApps(), allowedIps)) {
+                this.discordPid = process.pid;
+                this.state = "active";
+                return true;
+            }
+            this.goLiveAllowedIps = null;
+            await this.releaseOwnership(owner);
+            return false;
+        });
     }
 
-    // Uma atualização do Discord muda a pasta app-*: o serviço segue filtrando o caminho antigo.
-    private serviceTracksThisDiscord(): boolean {
-        try {
-            const config = fs.readFileSync(this.serviceConfigPath, "utf8").toLowerCase();
-            return config.includes(path.resolve(process.execPath).toLowerCase());
-        } catch {
-            return true;
-        }
+    // Só um perfil pronto serve aqui: gerar rota nova é trabalho do caminho normal.
+    private fastStartProfile(): string | null {
+        const settings = this.settings();
+        const usable = settings.mode === "custom"
+            ? fs.existsSync(this.customProfilePath)
+            : Boolean(settings.protonUsername) && this.protonProfileMatches(settings.protonUsername, this.protonProfileSelection(settings));
+        if (!usable) return null;
+        const raw = fs.readFileSync(settings.mode === "custom" ? this.customProfilePath : this.profilePath, "utf8");
+        return windows.validateWireGuardProfile(raw).valid ? raw : null;
+    }
+
+    public stopGoLiveTunnel(): Promise<VpnOperationResult> {
+        this.goLiveAllowedIps = null;
+        return this.serial(() => this.stopInternal(false));
+    }
+
+    public hasGoLiveRoute(): boolean {
+        const settings = this.settings();
+        return settings.mode === "custom" ? Boolean(settings.customConfigPath) : Boolean(settings.protonUsername);
+    }
+
+    public isRouteOperationRunning(): boolean {
+        return this.optimization !== null || this.routeSelection !== null;
+    }
+
+    public goLiveServer(): string | null {
+        return this.readActiveRoute()?.server ?? null;
+    }
+
+    public rotateGoLiveRoute(avoid: string[]): Promise<{ success: boolean; server?: string | null; error?: string; }> {
+        return this.serial(async () => {
+            const settings = this.settings();
+            if (settings.mode !== "proton" || !settings.protonUsername) return { success: false, error: "Only Proton routes can be replaced automatically." };
+            const selection = this.protonProfileSelection(settings);
+            const generated = await proton.generateOptimalProtonConfig(this.dataDir, {
+                username: settings.protonUsername,
+                country: selection.country,
+                freeOnly: selection.freeOnly,
+                autoPing: selection.autoPing,
+                excludeServers: avoid,
+                log: this.options.log,
+            });
+            if (!generated.success) return { success: false, error: generated.error };
+            const server = typeof generated.server === "string" ? generated.server : null;
+            this.writeProtonProfileAccount(settings.protonUsername, selection);
+            this.writeActiveRoute({ mode: "proton", server, source: "auto" });
+            return { success: true, server };
+        });
+    }
+
+    // Só sobra túnel na abertura se o Discord foi encerrado à força ou o PC caiu com ele ligado.
+    public stopLeftoverTunnel(): Promise<VpnOperationResult> | null {
+        return isWindows() && this.state === "active" && this.goLiveAllowedIps === null ? this.shutdown(false) : null;
     }
 
     public hasCleanupWork(): boolean {
@@ -498,7 +554,7 @@ export class PluginVpnController {
             if (!inspection.active) {
                 if (this.isLiveForeignOwner(owner)) {
                     this.state = "recovery_required";
-                    this.setDiagnostic("ownership", false, "outra instância do plugin ainda possui o lock da VPN");
+                    this.setDiagnostic("ownership", false, "another plugin instance still holds the VPN lock");
                     this.options.log("warn", "boot encontrou owner vivo enquanto o serviço não foi confirmado; cleanup adiado");
                     return;
                 }
@@ -507,12 +563,12 @@ export class PluginVpnController {
                 await this.removeProbe({ staleOwner: owner, sweep: true });
                 if (owner && !await this.releaseOwnership(owner)) {
                     this.state = "recovery_required";
-                    this.setDiagnostic("ownership", false, "não foi possível liberar o lock da VPN no boot");
+                    this.setDiagnostic("ownership", false, "couldn't release the VPN lock at startup");
                     return;
                 }
                 if (relaunchWasNotConfirmed) {
                     this.state = "recovery_required";
-                    this.setDiagnostic("ownership", false, "o relaunch anterior não confirmou o WireSock; ativação automática suspensa");
+                    this.setDiagnostic("ownership", false, "the previous relaunch didn't confirm WireSock; automatic activation is on hold");
                     this.options.log("warn", "relaunch do Discord não confirmou o WireSock; autostart suspenso");
                     return;
                 }
@@ -520,12 +576,12 @@ export class PluginVpnController {
                 return;
             }
             if (!inspection.owned) {
-                this.blockExternal(inspection.reason || "WireSock externo já está ativo.");
+                this.blockExternal(inspection.reason || "An external WireSock is already active.");
                 return;
             }
             if (!this.options.isEnabled() && this.isLiveForeignOwner(owner)) {
                 this.state = "recovery_required";
-                this.setDiagnostic("ownership", false, "outra instância do plugin ainda possui o lock da VPN");
+                this.setDiagnostic("ownership", false, "another plugin instance still holds the VPN lock");
                 this.options.log("warn", "plugin desativado não interrompeu uma sessão pertencente a outra instância viva");
                 return;
             }
@@ -550,7 +606,7 @@ export class PluginVpnController {
                     this.initialized = false;
                     this.state = "recovery_required";
                     this.externalReason = null;
-                    this.setDiagnostic("ownership", false, orphan.error || "não foi possível parar o serviço órfão WireSock no boot");
+                    this.setDiagnostic("ownership", false, orphan.error || "couldn't stop the orphaned WireSock service at startup");
                     this.options.log("warn", "boot não conseguiu parar o serviço órfão WireSock; ação manual necessária", { mode: "diagnostic-only" });
                     return;
                 }
@@ -564,8 +620,6 @@ export class PluginVpnController {
             if (adopted.probePath) await this.cleanupStaleProbes([adopted.probePath]);
             this.state = "active";
             this.discordPid = process.pid;
-            this.appsOutdated = !this.serviceTracksThisDiscord();
-            if (this.appsOutdated) this.options.log("warn", "túnel ativo aponta para outra versão do Discord; reconexão necessária");
             this.diagnosticGeneration++;
             this.startWatchdog();
             this.startDiagnostics("adoption");
@@ -584,7 +638,7 @@ export class PluginVpnController {
         this.initialized = true;
         if (!isSupportedLinuxArchitecture(process.platform, process.arch)) {
             this.state = "dependency_missing";
-            this.setDiagnostic("dependency", false, "O transporte Linux do plugin exige arquitetura x64.");
+            this.setDiagnostic("dependency", false, "The plugin's Linux transport requires x64.");
             return;
         }
         try {
@@ -593,7 +647,7 @@ export class PluginVpnController {
             if (!inspection.reliable) {
                 this.initialized = false;
                 this.state = "recovery_required";
-                this.setDiagnostic("wireguard", false, inspection.reason || "não foi possível confirmar o namespace Linux");
+                this.setDiagnostic("wireguard", false, inspection.reason || "couldn't confirm the Linux namespace");
                 this.options.log("warn", "boot Linux não confirmou o estado do plugin; cleanup adiado", { mode: "diagnostic-only" });
                 return;
             }
@@ -605,7 +659,7 @@ export class PluginVpnController {
             );
             if (inspection.externalConflict && (!owner || ownerPointsToProtectedResource)) {
                 this.state = "blocked_external";
-                this.externalReason = inspection.reason || "interface ou namespace externo está ativo";
+                this.externalReason = inspection.reason || "an external interface or namespace is active";
                 this.setDiagnostic("ownership", false, this.externalReason);
                 this.options.log("warn", "boot Linux preservou recurso de rede externo", { mode: "diagnostic-only" });
                 return;
@@ -613,13 +667,13 @@ export class PluginVpnController {
             if (!owner?.namespace || !owner.interfaceName) {
                 if (inspection.active) {
                     this.state = "recovery_required";
-                    this.setDiagnostic("ownership", false, inspection.reason || "resíduo do namespace Linux sem owner");
+                    this.setDiagnostic("ownership", false, inspection.reason || "leftover Linux namespace with no owner");
                     this.options.log("warn", "boot Linux encontrou namespace residual sem owner; cleanup adiado", { mode: "diagnostic-only" });
                     return;
                 }
                 if (owner && !await this.releaseOwnership(owner)) {
                     this.state = "recovery_required";
-                    this.setDiagnostic("ownership", false, "o owner Linux não contém um namespace recuperável");
+                    this.setDiagnostic("ownership", false, "the Linux owner has no recoverable namespace");
                     return;
                 }
                 const dependencyIssues = linux.linuxDependencyIssues();
@@ -638,12 +692,12 @@ export class PluginVpnController {
                 if (relaunchWasNotConfirmed) this.automaticBootSuppressed = true;
                 if (!await this.releaseOwnership(owner)) {
                     this.state = "recovery_required";
-                    this.setDiagnostic("ownership", false, "não foi possível liberar o owner Linux após a perda do namespace");
+                    this.setDiagnostic("ownership", false, "couldn't release the Linux owner after losing the namespace");
                     return;
                 }
                 this.state = relaunchWasNotConfirmed ? "recovery_required" : "inactive";
                 if (relaunchWasNotConfirmed)
-                    this.setDiagnostic("ownership", false, "o relaunch Linux não confirmou o namespace; ativação automática suspensa");
+                    this.setDiagnostic("ownership", false, "the Linux relaunch didn't confirm the namespace; automatic activation is on hold");
                 else {
                     const dependencyIssues = linux.linuxDependencyIssues();
                     if (dependencyIssues.length > 0) {
@@ -657,13 +711,13 @@ export class PluginVpnController {
             if (!linux.isProcessInNamespace(owner.namespace)) {
                 if (owner.pid !== process.pid && processAlive(owner.pid)) {
                     this.state = "blocked_external";
-                    this.externalReason = "outra instância do GoLiveBypass ainda possui o namespace Linux";
+                    this.externalReason = "another GoLiveBypass instance still holds the Linux namespace";
                     this.setDiagnostic("ownership", false, this.externalReason);
                     return;
                 }
                 this.automaticBootSuppressed = true;
                 this.state = "recovery_required";
-                this.setDiagnostic("ownership", false, "o namespace Linux próprio existe, mas este processo está fora dele");
+                this.setDiagnostic("ownership", false, "the plugin's Linux namespace exists, but this process is outside it");
                 this.options.log("warn", "boot Linux aguardará ativação explícita para recriar o namespace", { mode: "diagnostic-only" });
                 return;
             }
@@ -695,9 +749,9 @@ export class PluginVpnController {
                 discordPid: null,
                 profilePath: null,
                 configPath: null,
-                externalReason: "O transporte Linux do plugin exige Linux x64.",
+                externalReason: "The plugin's Linux transport requires Linux x64.",
                 lastDiagnostic: this.lastDiagnostic,
-                message: "Linux x64 necessário",
+                message: "Linux x64 required",
                 route: this.readActiveRoute(),
             };
         }
@@ -727,14 +781,14 @@ export class PluginVpnController {
                     ? "dependency_missing"
                     : this.state;
         const externalReason = externalBlocked
-            ? inspection.reason || "interface ou namespace externo está ativo"
-            : inspection.reliable ? (this.externalReason || null) : inspection.reason || "estado do namespace Linux desconhecido";
+            ? inspection.reason || "an external interface or namespace is active"
+            : inspection.reliable ? (this.externalReason || null) : inspection.reason || "Linux namespace state unknown";
         const message = reportedState === "inactive"
-            ? "VPN inativa"
+            ? "VPN off"
             : reportedState === "blocked_external"
-                ? externalReason || "Recurso VPN externo está ativo"
+                ? externalReason || "An external VPN resource is active"
                 : reportedState === "dependency_missing"
-                    ? externalReason || dependencyIssues[0] || "Dependência Linux ausente"
+                    ? externalReason || dependencyIssues[0] || "Linux dependency missing"
                     : this.statusMessage();
         return {
             state: reportedState,
@@ -770,9 +824,9 @@ export class PluginVpnController {
                 discordPid: null,
                 profilePath: null,
                 configPath: null,
-                externalReason: "A VPN do plugin nesta versão está disponível somente no Windows x64.",
+                externalReason: "This plugin version's VPN is only available on Windows x64.",
                 lastDiagnostic: this.lastDiagnostic,
-                message: "Windows x64 necessário",
+                message: "Windows x64 required",
                 route: this.readActiveRoute(),
             };
         }
@@ -808,7 +862,7 @@ export class PluginVpnController {
             || this.state === "stopping"
             || this.state === "restart_pending";
         if (inspection.reliable && inspection.active && !inspection.owned && !operationInProgress) {
-            const reason = inspection.reason || "WireSock externo está ativo.";
+            const reason = inspection.reason || "An external WireSock is active.";
             if (this.state !== "blocked_external" || this.externalReason !== reason) this.blockExternal(reason);
         }
         const active = this.state === "active" && inspection.active && inspection.owned;
@@ -827,9 +881,8 @@ export class PluginVpnController {
                 && (inspection.origin === "gui" || inspection.origin === "managed"),
             externalReason: this.externalReason,
             lastDiagnostic: this.lastDiagnostic,
-            message: reportedState === "inactive" ? "VPN inativa" : this.statusMessage(),
+            message: reportedState === "inactive" ? "VPN off" : this.statusMessage(),
             route: this.readActiveRoute(),
-            appsOutdated: active && this.appsOutdated,
         };
     }
     public async getStatusAsync(): Promise<VpnStatus> {
@@ -861,7 +914,7 @@ export class PluginVpnController {
                 success: false,
                 suppressed: true,
                 state: this.state,
-                error: "A ativação automática está suspensa porque o último relaunch não confirmou a VPN. Ative pelo painel.",
+                error: "Automatic activation is on hold because the last relaunch didn't confirm the VPN. Turn it on from the panel.",
             });
         }
         return this.serial(() => this.adoptActiveTunnelAtBoot());
@@ -872,7 +925,7 @@ export class PluginVpnController {
         const inspection = isLinux() ? linux.inspectLinuxNetworkSync(owner) : this.inspectWindows();
         if (!inspection.reliable) {
             this.options.log("warn", "ativação automática não confirmou o estado da VPN; ativação explícita segue disponível", { mode: "diagnostic-only" });
-            return { success: false, suppressed: true, state: this.state, error: "Não foi possível confirmar o estado da VPN no boot." };
+            return { success: false, suppressed: true, state: this.state, error: "Couldn't confirm the VPN state at startup." };
         }
         if (!inspection.active || !inspection.owned) {
             this.options.log("info", "VPN não foi ativada automaticamente porque o túnel não está ativo; ative pelo painel");
@@ -880,7 +933,7 @@ export class PluginVpnController {
                 success: false,
                 suppressed: true,
                 state: this.state,
-                error: "A VPN não está ativa. Ative pelo painel do GoLiveBypass para aplicar a rota.",
+                error: "The VPN isn't on. Turn it on from the GoLiveBypass panel to apply the route.",
             };
         }
         return this.startInternal(false);
@@ -924,7 +977,7 @@ export class PluginVpnController {
      */
     private importCustomConfigUnlocked(sourcePath: string): { success: boolean; error?: string; path?: string } {
         try {
-            if (!isWindows() && !isLinux()) throw new Error("O transporte VPN do plugin exige Windows x64 ou Linux x64.");
+            if (!isWindows() && !isLinux()) throw new Error("The plugin's VPN transport requires Windows x64 or Linux x64.");
             const raw = fs.readFileSync(this.resolveCustomConfigSource(sourcePath), "utf8");
             const validation = validateWireGuardConfig(raw);
             if (!validation.valid) throw new Error(validation.error);
@@ -945,11 +998,11 @@ export class PluginVpnController {
      */
     private resolveCustomConfigSource(sourcePath: string | undefined): string {
         const requested = typeof sourcePath === "string" ? sourcePath.trim() : "";
-        if (!requested) throw new Error("Nenhum arquivo WireGuard personalizado foi importado ainda.");
+        if (!requested) throw new Error("No custom WireGuard file has been imported yet.");
         const source = path.resolve(requested);
-        if (!source || !fs.existsSync(source) || !fs.statSync(source).isFile()) throw new Error("Arquivo WireGuard não encontrado.");
+        if (!source || !fs.existsSync(source) || !fs.statSync(source).isFile()) throw new Error("WireGuard file not found.");
         if (source === this.profilePath && fs.existsSync(this.profileAccountPath))
-            throw new Error("A configuração personalizada aponta para o perfil Proton em uso. Selecione o arquivo .conf novamente.");
+            throw new Error("The custom config points to the Proton profile in use. Select the .conf file again.");
         return source;
     }
 
@@ -968,7 +1021,7 @@ export class PluginVpnController {
 
     public loginProton(payload: ProtonLoginPayload, solveCaptcha: (url: string, signal: AbortSignal) => Promise<ProtonCaptchaSolution>): Promise<proton.ProtonLoginResult> {
         if (this.protonLogin) {
-            const message = "Já existe um login Proton em andamento.";
+            const message = "A Proton sign-in is already in progress.";
             return Promise.resolve({ success: false, code: "CONFIGURATION_ERROR", message, error: message, retryable: true });
         }
 
@@ -983,7 +1036,7 @@ export class PluginVpnController {
                 const switchingAccount = Boolean(previousUsername && username && previousUsername.toLowerCase() !== username.toLowerCase());
                 const currentStatus = switchingAccount ? this.getStatus() : null;
                 if (switchingAccount && (currentStatus?.active || this.state === "active")) {
-                    const message = "Restaure a rede antes de trocar a conta Proton.";
+                    const message = "Restore the network before switching Proton accounts.";
                     return { success: false, code: "CONFIGURATION_ERROR", message, error: message, retryable: false };
                 }
 
@@ -997,8 +1050,8 @@ export class PluginVpnController {
                     // primeira pede nova tentativa, a segunda é decisão do usuário.
                     if (!captcha.ok) {
                         const message = captcha.message || (captcha.code === "CAPTCHA_CANCELLED"
-                            ? "A verificação Proton foi cancelada."
-                            : "A verificação expirou ou foi recusada. Tente novamente.");
+                            ? "The Proton check was cancelled."
+                            : "The check expired or was refused. Try again.");
                         return { success: false, code: captcha.code, message, error: message, retryable: true };
                     }
                     result = await proton.loginProton(this.dataDir, username, payload.password, payload.twoFactorCode, captcha.token, this.options.log);
@@ -1051,15 +1104,15 @@ export class PluginVpnController {
             if (isLinux()) {
                 const inspection = linux.inspectLinuxNetworkSync(owner);
                 if (!inspection.reliable)
-                    return { success: false, error: inspection.reason || "Não foi possível confirmar o namespace Linux." };
+                    return { success: false, error: inspection.reason || "Couldn't confirm the Linux namespace." };
                 if (inspection.active || owner || this.state !== "inactive")
-                    return { success: false, error: "Restaure a rede antes de sair da conta Proton." };
+                    return { success: false, error: "Restore the network before signing out of Proton." };
             } else {
                 const inspection = this.inspectWindows();
                 if (isUnknownWireSockInspection(inspection))
                     return { success: false, error: unknownWireSockMessage(inspection) };
                 if (inspection.active || owner || this.state !== "inactive")
-                    return { success: false, error: "Restaure a rede antes de sair da conta Proton." };
+                    return { success: false, error: "Restore the network before signing out of Proton." };
             }
 
             try {
@@ -1068,23 +1121,23 @@ export class PluginVpnController {
                 // removemos esses arquivos quando o modo Proton os gerou; um
                 // .conf personalizado nunca deve ser apagado pelo logout.
                 if (!proton.removeProtonSession(this.dataDir))
-                    return { success: false, error: "Não foi possível remover a sessão Proton do armazenamento local." };
+                    return { success: false, error: "Couldn't remove the Proton session from local storage." };
                 if (settings.mode === "proton") this.clearProtonArtifacts();
                 // Sem conta não há catálogo válido: medição e seleção pendente somem juntas.
                 this.invalidateRouteMeasurement();
                 return { success: true };
             } catch (error) {
                 this.options.log("warn", "não consegui concluir o logout Proton", { erro: errorMessage(error) });
-                return { success: false, error: "Não foi possível limpar todos os dados locais da sessão Proton." };
+                return { success: false, error: "Couldn't clear all local Proton session data." };
             }
         });
     }
 
     public async optimizeProton(options: ProtonOptimizationOptions): Promise<proton.ProtonOptimizationResult & { cancelled?: boolean; deferred?: boolean }> {
-        if (!isSupportedVpnArchitecture(process.platform, process.arch)) return { success: false, error: "A VPN do plugin exige Windows x64 ou Linux x64." };
-        if (this.optimization) return { success: false, error: "Já existe uma otimização Proton em andamento." };
-        if (this.routeSelection) return { success: false, error: "Já existe uma seleção de rota Proton em andamento." };
-        if (this.routeMeasurement?.active) return { success: false, error: "Cancele a descoberta de rotas Proton antes de otimizar." };
+        if (!isSupportedVpnArchitecture(process.platform, process.arch)) return { success: false, error: "The plugin's VPN requires Windows x64 or Linux x64." };
+        if (this.optimization) return { success: false, error: "A Proton optimization is already running." };
+        if (this.routeSelection) return { success: false, error: "A Proton route selection is already running." };
+        if (this.routeMeasurement?.active) return { success: false, error: "Cancel the Proton route search before optimizing." };
 
         const id = options.requestId || `proton-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         const operationController = new AbortController();
@@ -1094,7 +1147,7 @@ export class PluginVpnController {
             try {
                 const settings = this.settings();
                 const username = normalizeUsername(settings.protonUsername);
-                if (!username) return { success: false, error: "Faça login com sua conta Proton antes de otimizar a rota." };
+                if (!username) return { success: false, error: "Sign in to Proton before optimizing the route." };
                 const selection: ProtonProfileSelection = {
                     country: normalizeCountry(options.country ?? settings.protonCountry),
                     freeOnly: options.freeOnly ?? settings.protonFreeOnly,
@@ -1104,27 +1157,27 @@ export class PluginVpnController {
                 const status = this.getStatus();
                 const wasActive = status.active;
                 if (status.state === "blocked_external" || this.state === "blocked_external")
-                    return { success: false, error: status.externalReason || this.externalReason || "Túnel externo está ativo." };
+                    return { success: false, error: status.externalReason || this.externalReason || "An external tunnel is active." };
                 if (isLinux() && status.requiresRelaunch)
-                    return { success: false, error: "Reinicie o Discord para entrar no namespace Linux antes de otimizar a rota." };
+                    return { success: false, error: "Restart Discord to enter the Linux namespace before optimizing the route." };
 
                 const restorePreviousRoute = async (): Promise<string | null> => {
                     if (!wasActive) return null;
                     const restored = await this.startInternal(false);
-                    return restored.success ? null : restored.error || "Não foi possível reativar a rota WireGuard anterior.";
+                    return restored.success ? null : restored.error || "Couldn't turn the previous WireGuard route back on.";
                 };
 
-                if (operationController.signal.aborted) return { success: false, cancelled: true, error: "Otimização Proton cancelada." };
+                if (operationController.signal.aborted) return { success: false, cancelled: true, error: "Proton optimization cancelled." };
                 // Linux cannot return this process to the host namespace after
                 // removing its tunnel. Keep the current route while measuring;
                 // the successful path below performs a single stop + external
                 // relaunch so the next process can activate the new profile.
                 if (wasActive && !isLinux()) {
                     const stopped = await this.stopInternal(false);
-                    if (!stopped.success) return { success: false, error: stopped.error || "Não foi possível pausar a VPN para otimizar a rota." };
+                    if (!stopped.success) return { success: false, error: stopped.error || "Couldn't pause the VPN to optimize the route." };
                     if (operationController.signal.aborted) {
                         const restoreError = await restorePreviousRoute();
-                        return { success: false, cancelled: true, error: restoreError || "Otimização Proton cancelada." };
+                        return { success: false, cancelled: true, error: restoreError || "Proton optimization cancelled." };
                     }
                 }
 
@@ -1153,19 +1206,19 @@ export class PluginVpnController {
                 }
                 if (operationController.signal.aborted) {
                     const restoreError = wasActive && !isLinux() ? await restorePreviousRoute() : null;
-                    return { success: false, cancelled: true, error: restoreError || "Otimização Proton cancelada." };
+                    return { success: false, cancelled: true, error: restoreError || "Proton optimization cancelled." };
                 }
                 if (result.success && wasActive) {
                     if (isLinux()) {
                         const stopped = await this.stopInternal(true);
-                        if (!stopped.success) return { ...result, success: false, error: stopped.error || "A rota foi otimizada, mas não consegui relançar o Discord fora do namespace Linux." };
-                        return { ...result, deferred: true, message: "Rota Proton otimizada; o Discord será relançado para aplicar a nova configuração." };
+                        if (!stopped.success) return { ...result, success: false, error: stopped.error || "The route was optimized, but Discord couldn't be relaunched outside the Linux namespace." };
+                        return { ...result, deferred: true, message: "Proton route optimized. Discord will relaunch to apply the new config." };
                     }
                     const restartError = await restorePreviousRoute();
                     if (restartError) return { ...result, success: false, error: restartError };
                 } else if (!result.success && wasActive && !isLinux()) {
                     const restoreError = await restorePreviousRoute();
-                    if (restoreError) return { ...result, error: `${result.error || "A otimização falhou."} ${restoreError}` };
+                    if (restoreError) return { ...result, error: `${result.error || "The optimization failed."} ${restoreError}` };
                 }
                 return result;
             } finally {
@@ -1189,15 +1242,15 @@ export class PluginVpnController {
      */
     public discoverProtonRoutes(options: ProtonRouteDiscoveryOptions = {}): Promise<ProtonRouteDiscoveryResult> {
         if (!isSupportedVpnArchitecture(process.platform, process.arch))
-            return Promise.resolve({ success: false, error: "A VPN do plugin exige Windows x64 ou Linux x64." });
+            return Promise.resolve({ success: false, error: "The plugin's VPN requires Windows x64 or Linux x64." });
         if (this.optimization)
-            return Promise.resolve({ success: false, error: "Já existe uma otimização Proton em andamento." });
+            return Promise.resolve({ success: false, error: "A Proton optimization is already running." });
         if (this.routeSelection)
-            return Promise.resolve({ success: false, error: "Já existe uma seleção de rota Proton em andamento." });
+            return Promise.resolve({ success: false, error: "A Proton route selection is already running." });
         if (this.protonLogin)
-            return Promise.resolve({ success: false, error: "Termine o login Proton antes de escolher uma rota." });
+            return Promise.resolve({ success: false, error: "Finish signing in to Proton before choosing a route." });
         if (this.routeMeasurement?.active && !this.routeMeasurement.controller.signal.aborted)
-            return Promise.resolve({ success: false, error: "Já existe uma descoberta de rotas Proton em andamento." });
+            return Promise.resolve({ success: false, error: "A Proton route search is already running." });
 
         const requestId = normalizeLoginRequestId(options.requestId);
         const controller = new AbortController();
@@ -1232,7 +1285,7 @@ export class PluginVpnController {
                 const settings = this.settings();
                 const username = normalizeUsername(settings.protonUsername);
                 if (!username) {
-                    const error = "Faça login com sua conta Proton antes de escolher uma rota.";
+                    const error = "Sign in to Proton before choosing a route.";
                     this.finishRouteMeasurement(measurement, "failed", error);
                     return { success: false, measurementId: measurement.measurementId, error };
                 }
@@ -1258,7 +1311,7 @@ export class PluginVpnController {
                 if (!isCurrent()) return this.cancelledRouteDiscovery(measurement);
 
                 if (!catalog.success || measurement.routes.size === 0) {
-                    const error = catalog.error || "Nenhuma rota Proton compatível foi encontrada para esta conta e os filtros atuais.";
+                    const error = catalog.error || "No compatible Proton route was found for this account and the current filters.";
                     this.finishRouteMeasurement(measurement, "failed", error);
                     return {
                         success: false,
@@ -1347,41 +1400,41 @@ export class PluginVpnController {
      */
     public selectProtonRoute(options: ProtonRouteSelectionOptions): Promise<ProtonRouteSelectionResult> {
         if (!isSupportedVpnArchitecture(process.platform, process.arch))
-            return Promise.resolve({ success: false, error: "A VPN do plugin exige Windows x64 ou Linux x64." });
-        if (this.optimization) return Promise.resolve({ success: false, error: "Já existe uma otimização Proton em andamento." });
-        if (this.routeSelection) return Promise.resolve({ success: false, error: "Já existe uma seleção de rota Proton em andamento." });
-        if (this.protonLogin) return Promise.resolve({ success: false, error: "Termine o login Proton antes de aplicar uma rota." });
+            return Promise.resolve({ success: false, error: "The plugin's VPN requires Windows x64 or Linux x64." });
+        if (this.optimization) return Promise.resolve({ success: false, error: "A Proton optimization is already running." });
+        if (this.routeSelection) return Promise.resolve({ success: false, error: "A Proton route selection is already running." });
+        if (this.protonLogin) return Promise.resolve({ success: false, error: "Finish signing in to Proton before applying a route." });
 
         const measurementId = typeof options.measurementId === "string" ? options.measurementId.trim() : "";
         const server = typeof options.server === "string" ? options.server.trim() : "";
         if (!measurementId || measurementId.length > 128 || !server || !CATALOG_SERVER_RE.test(server)
             || server.length > MAX_PROTON_ROUTE_SERVER_LENGTH)
-            return Promise.resolve({ success: false, error: "A identificação da medição ou da rota é inválida." });
+            return Promise.resolve({ success: false, error: "The measurement or route ID is invalid." });
 
         this.sweepRouteMeasurement();
         const measurement = this.routeMeasurement;
         if (!measurement || measurement.generation !== this.routeMeasurementGeneration)
-            return Promise.resolve({ success: false, error: "A medição de rotas expirou. Faça uma nova descoberta." });
+            return Promise.resolve({ success: false, error: "The route measurement expired. Search for routes again." });
         if (measurement.measurementId !== measurementId)
-            return Promise.resolve({ success: false, error: "Esta medição de rotas não é mais a atual. Faça uma nova descoberta." });
+            return Promise.resolve({ success: false, error: "This route measurement is out of date. Search for routes again." });
         if (measurement.expiresAt <= Date.now())
-            return Promise.resolve({ success: false, error: "A medição de rotas expirou. Faça uma nova descoberta." });
+            return Promise.resolve({ success: false, error: "The route measurement expired. Search for routes again." });
         if (measurement.active)
-            return Promise.resolve({ success: false, error: "A descoberta de rotas ainda está em andamento. Aguarde para escolher uma rota." });
+            return Promise.resolve({ success: false, error: "The route search is still running. Wait to choose a route." });
 
         const candidate = measurement.routes.get(server);
         if (!candidate)
-            return Promise.resolve({ success: false, error: "A rota escolhida não pertence à medição atual. Faça uma nova descoberta." });
+            return Promise.resolve({ success: false, error: "The chosen route isn't in the current measurement. Search for routes again." });
         if (!isValidProtonPing(candidate.entry.pingMs))
-            return Promise.resolve({ success: false, error: "A rota escolhida está sem ping válido e não pode ser aplicada. Faça uma nova descoberta." });
+            return Promise.resolve({ success: false, error: "The chosen route has no valid ping and can't be applied. Search for routes again." });
 
         const settings = this.settings();
         const username = normalizeUsername(settings.protonUsername);
         if (!username || !protonUsernamesMatch(measurement.username, username))
-            return Promise.resolve({ success: false, error: "A conta Proton mudou desde a medição. Faça uma nova descoberta." });
+            return Promise.resolve({ success: false, error: "The Proton account changed since the measurement. Search for routes again." });
         const selection = this.protonProfileSelection(settings);
         if (selection.country !== measurement.country || selection.freeOnly !== measurement.freeOnly || selection.autoPing !== measurement.autoPing)
-            return Promise.resolve({ success: false, error: "As preferências Proton mudaram desde a medição. Faça uma nova descoberta." });
+            return Promise.resolve({ success: false, error: "The Proton preferences changed since the measurement. Search for routes again." });
 
         const operation = { id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, controller: new AbortController() };
         this.routeSelection = operation;
@@ -1392,13 +1445,13 @@ export class PluginVpnController {
             let backup: ProtonProfileBackup | null = null;
             let profilePromoted = false;
             try {
-                if (!isCurrent()) return { success: false, cancelled: true, error: "A seleção de rota Proton foi cancelada." };
+                if (!isCurrent()) return { success: false, cancelled: true, error: "The Proton route selection was cancelled." };
                 if (status.state === "blocked_external" || this.state === "blocked_external")
-                    return { success: false, error: status.externalReason || this.externalReason || "Túnel externo está ativo." };
+                    return { success: false, error: status.externalReason || this.externalReason || "An external tunnel is active." };
                 if (isLinux() && wasActive)
-                    return { success: false, error: "Restaure a rede antes de validar outra rota Proton no Linux." };
+                    return { success: false, error: "Restore the network before validating another Proton route on Linux." };
                 if (isLinux() && status.requiresRelaunch)
-                    return { success: false, error: "Reinicie o Discord para entrar no namespace Linux antes de escolher a rota." };
+                    return { success: false, error: "Restart Discord to enter the Linux namespace before choosing the route." };
 
                 // O probe manual do helper não pode disputar o serviço WireSock com a
                 // rota ativa; no Linux este processo não volta ao namespace original,
@@ -1406,11 +1459,11 @@ export class PluginVpnController {
                 if (wasActive && !isLinux()) {
                     const stopped = await this.stopInternal(false);
                     if (!stopped.success)
-                        return { success: false, error: stopped.error || "Não foi possível pausar a VPN para aplicar a rota escolhida." };
+                        return { success: false, error: stopped.error || "Couldn't pause the VPN to apply the chosen route." };
                 }
                 if (!isCurrent()) {
                     const restoreError = await this.rollbackRouteSelection(backup, wasActive, profilePromoted);
-                    return { success: false, cancelled: true, error: restoreError || "A seleção de rota Proton foi cancelada." };
+                    return { success: false, cancelled: true, error: restoreError || "The Proton route selection was cancelled." };
                 }
 
                 backup = this.readProtonProfileBackup();
@@ -1425,17 +1478,17 @@ export class PluginVpnController {
                 profilePromoted = generated.success;
                 if (!isCurrent()) {
                     const restoreError = await this.rollbackRouteSelection(backup, wasActive, profilePromoted);
-                    return { success: false, cancelled: true, error: restoreError || "A seleção de rota Proton foi cancelada." };
+                    return { success: false, cancelled: true, error: restoreError || "The Proton route selection was cancelled." };
                 }
                 if (!generated.success) {
-                    const error = generated.error || "Não foi possível validar a rota Proton escolhida.";
+                    const error = generated.error || "Couldn't validate the chosen Proton route.";
                     const restoreError = await this.rollbackRouteSelection(backup, wasActive, profilePromoted);
                     return { success: false, error: restoreError ? `${error} ${restoreError}` : error };
                 }
                 // O helper já promoveu o perfil por staging; confirmamos que o servidor
                 // promovido é exatamente o escolhido e que o perfil final é válido.
                 if (generated.server !== server || !isValidProtonPing(generated.pingMs))
-                    throw new Error("A validação retornou uma rota diferente da escolhida.");
+                    throw new Error("Validation returned a different route from the one chosen.");
                 const promoted = fs.existsSync(this.profilePath) ? fs.readFileSync(this.profilePath, "utf8") : "";
                 const validation = validateWireGuardConfig(promoted);
                 if (!validation.valid) throw new Error(validation.error);
@@ -1448,20 +1501,20 @@ export class PluginVpnController {
                 this.writeActiveRoute({ mode: "proton", server, source: "manual" });
                 const applied = this.publicRouteSelection(generated, server);
                 if (!wasActive) {
-                    return { ...applied, state: this.state, message: "Rota Proton preparada; ela será usada na próxima ativação." };
+                    return { ...applied, state: this.state, message: "Proton route ready. It'll be used the next time the VPN turns on." };
                 }
                 if (isLinux()) {
                     const stopped = await this.stopInternal(true);
                     if (!stopped.success) {
-                        const error = stopped.error || "A rota foi validada, mas não consegui relançar o Discord fora do namespace Linux.";
+                        const error = stopped.error || "The route was validated, but Discord couldn't be relaunched outside the Linux namespace.";
                         const restoreError = await this.rollbackRouteSelection(backup, wasActive, profilePromoted);
                         return { success: false, error: restoreError ? `${error} ${restoreError}` : error };
                     }
-                    return { ...applied, deferred: true, state: this.state, message: "Rota Proton preparada; o Discord será relançado para aplicar a nova configuração." };
+                    return { ...applied, deferred: true, state: this.state, message: "Proton route ready. Discord will relaunch to apply the new config." };
                 }
                 const restarted = await this.startInternal(true);
                 if (!restarted.success) {
-                    const error = restarted.error || "A rota foi validada, mas não consegui reiniciar o Discord para aplicar a nova configuração.";
+                    const error = restarted.error || "The route was validated, but Discord couldn't restart to apply the new config.";
                     const restoreError = await this.rollbackRouteSelection(backup, wasActive, profilePromoted);
                     return { success: false, error: restoreError ? `${error} ${restoreError}` : error };
                 }
@@ -1469,11 +1522,11 @@ export class PluginVpnController {
                     ...applied,
                     deferred: restarted.state === "restart_pending",
                     state: restarted.state,
-                    message: restarted.message || "Rota Proton aplicada.",
+                    message: restarted.message || "Proton route applied.",
                 };
             } catch (error) {
                 const cancelled = error instanceof Error && error.name === "AbortError";
-                const detail = cancelled ? "A seleção de rota Proton foi cancelada." : errorMessage(error);
+                const detail = cancelled ? "The Proton route selection was cancelled." : errorMessage(error);
                 const restoreError = await this.rollbackRouteSelection(backup, wasActive, profilePromoted);
                 if (!cancelled) this.options.log("error", "seleção manual de rota Proton falhou", { erro: detail });
                 return { success: false, ...(cancelled ? { cancelled: true } : {}), error: restoreError ? `${detail} ${restoreError}` : detail };
@@ -1492,7 +1545,7 @@ export class PluginVpnController {
     }
 
     private cancelledRouteDiscovery(measurement: ProtonRouteMeasurement): ProtonRouteDiscoveryResult {
-        this.finishRouteMeasurement(measurement, "cancelled", "A descoberta de rotas Proton foi cancelada.");
+        this.finishRouteMeasurement(measurement, "cancelled", "The Proton route search was cancelled.");
         return {
             success: false,
             cancelled: true,
@@ -1729,7 +1782,7 @@ export class PluginVpnController {
             try {
                 this.restoreProtonProfileBackup(backup);
             } catch (error) {
-                failure = `O perfil anterior não foi restaurado: ${errorMessage(error)}`;
+                failure = `The previous profile wasn't restored: ${errorMessage(error)}`;
                 this.options.log("error", "não consegui restaurar o perfil Proton anterior", { erro: errorMessage(error) });
             }
         } else if (profilePromoted) {
@@ -1737,14 +1790,14 @@ export class PluginVpnController {
                 fs.rmSync(this.profilePath, { force: true });
                 this.clearProtonProfileAccount();
             } catch (error) {
-                failure = `O perfil novo não foi removido: ${errorMessage(error)}`;
+                failure = `The new profile wasn't removed: ${errorMessage(error)}`;
                 this.options.log("error", "não consegui remover o perfil Proton novo após falha", { erro: errorMessage(error) });
             }
         }
         if (wasActive && !isLinux()) {
             const restored = await this.startInternal(false);
             if (!restored.success) {
-                const detail = restored.error || "não foi possível reativar a rota WireGuard anterior";
+                const detail = restored.error || "couldn't turn the previous WireGuard route back on";
                 failure = failure ? `${failure} ${detail}` : detail;
                 this.options.log("error", "rota anterior não voltou após falha da seleção manual", { erro: detail });
             }
@@ -1781,16 +1834,16 @@ export class PluginVpnController {
 
     private statusMessage(): string {
         switch (this.state) {
-            case "active": return "VPN WireGuard ativa para este Discord";
-            case "authorizing": return "Solicitando autorização administrativa";
-            case "preparing": return "Preparando perfil e WireGuard";
-            case "starting": return "Iniciando túnel WireGuard";
-            case "restart_pending": return "VPN preparada; reiniciando Discord";
-            case "stopping": return "Restaurando rede normal";
-            case "blocked_external": return this.externalReason || "Recurso VPN externo está ativo";
-            case "dependency_missing": return this.externalReason || "Dependência Linux ausente";
-            case "recovery_required": return "A rede precisa de recuperação manual";
-            default: return "VPN inativa";
+            case "active": return "WireGuard VPN active for this Discord";
+            case "authorizing": return "Requesting admin authorization";
+            case "preparing": return "Preparing the profile and WireGuard";
+            case "starting": return "Starting the WireGuard tunnel";
+            case "restart_pending": return "VPN ready. Restarting Discord";
+            case "stopping": return "Restoring the normal network";
+            case "blocked_external": return this.externalReason || "An external VPN resource is active";
+            case "dependency_missing": return this.externalReason || "Linux dependency missing";
+            case "recovery_required": return "The network needs manual recovery";
+            default: return "VPN off";
         }
     }
 
@@ -1811,7 +1864,7 @@ export class PluginVpnController {
         if (isLinux()) return this.startLinuxInternal(relaunch);
         if (!isSupportedWindowsArchitecture(process.platform, process.arch)) {
             this.state = "blocked_external";
-            this.externalReason = "A VPN do plugin nesta versão está disponível somente no Windows x64.";
+            this.externalReason = "This plugin version's VPN is only available on Windows x64.";
             return { success: false, state: this.state, error: this.externalReason };
         }
         const existing = await windows.inspectWireSockUntilReliableAsync(this.serviceConfigPath, this.guiConfigPath);
@@ -1842,8 +1895,8 @@ export class PluginVpnController {
             // "ativava" em silêncio e nada mudava no cliente.
             if (relaunch && !this.restarting) {
                 if (!await this.requestRelaunch())
-                    return { success: false, state: this.state, error: "A VPN já estava ativa, mas não consegui reiniciar o Discord para aplicar a rota." };
-                return { success: true, state: "restart_pending", message: "VPN já estava ativa; o Discord será reiniciado para aplicar a rota." };
+                    return { success: false, state: this.state, error: "The VPN was already on, but Discord couldn't restart to apply the route." };
+                return { success: true, state: "restart_pending", message: "The VPN was already on. Discord will restart to apply the route." };
             }
             return { success: true, state: "active", message: this.statusMessage() };
         }
@@ -1853,7 +1906,7 @@ export class PluginVpnController {
         const managedConflict = relaunch && existing.active && !existing.owned
             && (existing.origin === "gui" || existing.origin === "managed");
         if (existing.active && !existing.owned && !managedConflict) {
-            this.blockExternal(existing.reason || "WireSock externo está ativo.");
+            this.blockExternal(existing.reason || "An external WireSock is active.");
             return { success: false, state: this.state, error: this.externalReason || undefined };
         }
 
@@ -1869,7 +1922,7 @@ export class PluginVpnController {
             await this.cleanupStaleProbes(this.probePath ? [this.probePath] : []);
             const settings = this.settings();
             if (settings.mode === "proton") {
-                if (!settings.protonUsername) throw new Error("Faça login com sua conta Proton antes de ativar.");
+                if (!settings.protonUsername) throw new Error("Sign in to Proton before turning it on.");
                 const selection = this.protonProfileSelection(settings);
                 if (!fs.existsSync(this.profilePath) || !this.protonProfileMatches(settings.protonUsername, selection)) {
                     const generated = await proton.generateOptimalProtonConfig(this.dataDir, {
@@ -1879,12 +1932,12 @@ export class PluginVpnController {
                         autoPing: selection.autoPing,
                         log: this.options.log,
                     });
-                    if (!generated.success) throw new Error(generated.error || "Não foi possível gerar a configuração Proton.");
+                    if (!generated.success) throw new Error(generated.error || "Couldn't generate the Proton config.");
                     this.writeProtonProfileAccount(settings.protonUsername, selection);
                     this.writeActiveRoute({ mode: "proton", server: typeof generated.server === "string" ? generated.server : null, source: "auto" });
                 }
             } else {
-                if (!settings.customConfigPath) throw new Error("Configure um arquivo WireGuard personalizado antes de ativar.");
+                if (!settings.customConfigPath) throw new Error("Set up a custom WireGuard file before turning it on.");
                 const imported = this.importCustomConfigUnlocked(settings.customConfigPath);
                 if (!imported.success) throw new Error(imported.error);
             }
@@ -1893,7 +1946,8 @@ export class PluginVpnController {
             if (!validation.valid) throw new Error(validation.error);
 
             const apps = this.discordAllowedApps();
-            const probe = this.prepareRouteProbe();
+            // A sonda de rota testa a internet inteira, e o filtro do Go Live só deixa passar o Discord.
+            const probe = this.goLiveAllowedIps === null ? this.prepareRouteProbe() : undefined;
             if (probe) apps.push(probe);
             owner.probePath = probe;
             await this.writeOwner(owner);
@@ -1902,10 +1956,10 @@ export class PluginVpnController {
             for (let attempt = 0; attempt < 2 && startedResult === null; attempt++) {
                 if (managedConflict || attempt > 0) {
                     const takeover = await windows.stopManagedWireSock(this.serviceConfigPath, this.guiConfigPath, this.options.log);
-                    if (!takeover.stopped) throw new Error(takeover.error || "A retomada da instância GoLiveBypass falhou.");
+                    if (!takeover.stopped) throw new Error(takeover.error || "Taking over the GoLiveBypass instance failed.");
                 }
                 try {
-                    startedResult = await windows.startWireSockService(this.serviceConfigPath, raw, apps, this.options.log);
+                    startedResult = await windows.startWireSockService(this.serviceConfigPath, raw, apps, this.options.log, this.goLiveAllowedIps ?? undefined);
                 } catch (startError) {
                     // Uma instância gerenciada pode reaparecer entre o preflight e a
                     // instalação do serviço (a GUI reativa sozinha). Um único retry com
@@ -1920,7 +1974,7 @@ export class PluginVpnController {
                     throw startError;
                 }
             }
-            if (!startedResult) throw new Error("Não foi possível iniciar o serviço WireSock após a retomada.");
+            if (!startedResult) throw new Error("Couldn't start the WireSock service after the takeover.");
             started = true;
             owner.configPath = startedResult.configPath;
             owner.restarting = relaunch;
@@ -1934,9 +1988,9 @@ export class PluginVpnController {
                     this.state = "active";
                     owner.restarting = false;
                     await this.writeOwner(owner);
-                    return { success: false, state: this.state, error: "A VPN foi iniciada, mas não consegui reiniciar o Discord para aplicar a rota." };
+                    return { success: false, state: this.state, error: "The VPN started, but Discord couldn't restart to apply the route." };
                 }
-                return { success: true, state: "restart_pending", message: "VPN preparada; o Discord será reiniciado." };
+                return { success: true, state: "restart_pending", message: "VPN ready. Discord will restart." };
             }
             return { success: true, state: "active", message: this.statusMessage() };
         } catch (error) {
@@ -1953,8 +2007,8 @@ export class PluginVpnController {
                 if (!cleanup.stopped) {
                     await this.removeProbe({ sweep: false });
                     this.state = "recovery_required";
-                    this.setDiagnostic("wireguard", false, cleanup.error || "limpeza incompleta");
-                    return { success: false, state: this.state, error: `A ativação falhou e a rede não foi restaurada: ${cleanup.error || "limpeza incompleta"}.` };
+                    this.setDiagnostic("wireguard", false, cleanup.error || "incomplete cleanup");
+                    return { success: false, state: this.state, error: `Turning on failed and the network wasn't restored: ${cleanup.error || "incomplete cleanup"}.` };
                 }
                 await this.removeProbe({ sweep: true });
             } else {
@@ -1963,8 +2017,8 @@ export class PluginVpnController {
             const message = errorMessage(error);
             if (owner && !await this.releaseOwnership(owner)) {
                 this.state = "recovery_required";
-                this.setDiagnostic("ownership", false, "não foi possível liberar o lock após falha de ativação");
-                return { success: false, state: this.state, error: `${message} O lock da VPN ficou pendente e requer recuperação.` };
+                this.setDiagnostic("ownership", false, "couldn't release the lock after the failed activation");
+                return { success: false, state: this.state, error: `${message} The VPN lock is still held and needs recovery.` };
             }
             this.state = "inactive";
             this.diagnosticGeneration++;
@@ -1977,7 +2031,7 @@ export class PluginVpnController {
     private async startLinuxInternal(relaunch: boolean): Promise<VpnOperationResult> {
         if (!isSupportedLinuxArchitecture(process.platform, process.arch)) {
             this.state = "dependency_missing";
-            this.externalReason = "O transporte Linux do plugin exige arquitetura x64.";
+            this.externalReason = "The plugin's Linux transport requires x64.";
             this.setDiagnostic("dependency", false, this.externalReason);
             return { success: false, state: this.state, error: this.externalReason };
         }
@@ -1986,7 +2040,7 @@ export class PluginVpnController {
         const existingInspection = linux.inspectLinuxNetworkSync(existing);
         if (!existingInspection.reliable) {
             this.state = "recovery_required";
-            this.setDiagnostic("wireguard", false, existingInspection.reason || "estado do namespace Linux desconhecido");
+            this.setDiagnostic("wireguard", false, existingInspection.reason || "Linux namespace state unknown");
             return { success: false, state: this.state, error: existingInspection.reason || undefined };
         }
         const ownerPointsToProtectedResource = Boolean(
@@ -1997,7 +2051,7 @@ export class PluginVpnController {
         );
         if (existingInspection.externalConflict && (!existing || ownerPointsToProtectedResource)) {
             this.state = "blocked_external";
-            this.externalReason = existingInspection.reason || "interface ou namespace externo está ativo";
+            this.externalReason = existingInspection.reason || "an external interface or namespace is active";
             this.setDiagnostic("ownership", false, this.externalReason);
             this.options.log("warn", "ativação Linux recusada para preservar túnel externo", { mode: "diagnostic-only" });
             return { success: false, state: this.state, error: this.externalReason };
@@ -2015,7 +2069,7 @@ export class PluginVpnController {
             }
             if (this.isLiveForeignOwner(existing)) {
                 this.state = "blocked_external";
-                this.externalReason = "outra instância do GoLiveBypass ainda controla o namespace Linux";
+                this.externalReason = "another GoLiveBypass instance still controls the Linux namespace";
                 this.setDiagnostic("ownership", false, this.externalReason);
                 return { success: false, state: this.state, error: this.externalReason };
             }
@@ -2030,13 +2084,12 @@ export class PluginVpnController {
         try {
             const dependencies = await linux.linuxDependencyStatus(false);
             if (!dependencies.ok) {
-                const detail = dependencies.error || dependencies.missing.join(", ") || "dependência Linux ausente";
+                const detail = dependencies.error || dependencies.missing.join(", ") || "Linux dependency missing";
                 this.state = "dependency_missing";
                 this.externalReason = detail;
                 this.setDiagnostic("dependency", false, detail);
                 return { success: false, state: this.state, error: detail };
             }
-
 
             if (existingInspection.active) {
                 const cleanupTarget = existing?.namespace && existing.interfaceName
@@ -2046,21 +2099,21 @@ export class PluginVpnController {
                         : null;
                 if (!cleanupTarget) {
                     this.state = "recovery_required";
-                    const detail = existingInspection.reason || "recurso Linux ativo sem owner seguro";
+                    const detail = existingInspection.reason || "active Linux resource with no safe owner";
                     this.setDiagnostic("ownership", false, detail);
                     return { success: false, state: this.state, error: detail };
                 }
                 const cleanup = await linux.stopLinuxNetwork(cleanupTarget, { log: this.options.log });
-                if (!cleanup.stopped) throw new Error(cleanup.error || "não foi possível remover a sessão Linux anterior");
-                if (existing && !await this.releaseOwnership(existing)) throw new Error("não foi possível liberar o owner Linux anterior");
+                if (!cleanup.stopped) throw new Error(cleanup.error || "couldn't remove the previous Linux session");
+                if (existing && !await this.releaseOwnership(existing)) throw new Error("couldn't release the previous Linux owner");
             } else if (existing && !await this.releaseOwnership(existing)) {
-                throw new Error("não foi possível liberar o owner Linux anterior");
+                throw new Error("couldn't release the previous Linux owner");
             }
 
             owner = await this.acquireLinuxOwnership();
             const settings = this.settings();
             if (settings.mode === "proton") {
-                if (!settings.protonUsername) throw new Error("Faça login com sua conta Proton antes de ativar.");
+                if (!settings.protonUsername) throw new Error("Sign in to Proton before turning it on.");
                 const selection = this.protonProfileSelection(settings);
                 if (!fs.existsSync(this.profilePath) || !this.protonProfileMatches(settings.protonUsername, selection)) {
                     const generated = await proton.generateOptimalProtonConfig(this.dataDir, {
@@ -2070,12 +2123,12 @@ export class PluginVpnController {
                         autoPing: selection.autoPing,
                         log: this.options.log,
                     });
-                    if (!generated.success) throw new Error(generated.error || "Não foi possível gerar a configuração Proton.");
+                    if (!generated.success) throw new Error(generated.error || "Couldn't generate the Proton config.");
                     this.writeProtonProfileAccount(settings.protonUsername, selection);
                     this.writeActiveRoute({ mode: "proton", server: typeof generated.server === "string" ? generated.server : null, source: "auto" });
                 }
             } else {
-                if (!settings.customConfigPath) throw new Error("Configure um arquivo WireGuard personalizado antes de ativar.");
+                if (!settings.customConfigPath) throw new Error("Set up a custom WireGuard file before turning it on.");
                 const imported = this.importCustomConfigUnlocked(settings.customConfigPath);
                 if (!imported.success) throw new Error(imported.error);
             }
@@ -2104,9 +2157,9 @@ export class PluginVpnController {
                         await this.releaseOwnership(owner);
                         this.state = "inactive";
                     }
-                    return { success: false, state: this.state, error: "A VPN foi iniciada, mas não consegui relançar o Discord dentro do namespace Linux." };
+                    return { success: false, state: this.state, error: "The VPN started, but Discord couldn't be relaunched inside the Linux namespace." };
                 }
-                return { success: true, state: "restart_pending", message: "VPN preparada; o Discord será relançado dentro do namespace Linux." };
+                return { success: true, state: "restart_pending", message: "VPN ready. Discord will relaunch inside the Linux namespace." };
             }
             return { success: true, state: "active", message: this.statusMessage() };
         } catch (error) {
@@ -2115,15 +2168,15 @@ export class PluginVpnController {
                 const cleanup = await linux.stopLinuxNetwork(owner, { log: this.options.log });
                 if (!cleanup.stopped) {
                     this.state = "recovery_required";
-                    this.setDiagnostic("wireguard", false, cleanup.error || "limpeza incompleta");
-                    return { success: false, state: this.state, error: `A ativação falhou e a rede não foi restaurada: ${cleanup.error || "limpeza incompleta"}.` };
+                    this.setDiagnostic("wireguard", false, cleanup.error || "incomplete cleanup");
+                    return { success: false, state: this.state, error: `Turning on failed and the network wasn't restored: ${cleanup.error || "incomplete cleanup"}.` };
                 }
             }
             const message = errorMessage(error);
             if (owner && !await this.releaseOwnership(owner)) {
                 this.state = "recovery_required";
-                this.setDiagnostic("ownership", false, "não foi possível liberar o owner Linux após falha de ativação");
-                return { success: false, state: this.state, error: `${message} O owner ficou pendente e requer recuperação.` };
+                this.setDiagnostic("ownership", false, "couldn't release the Linux owner after the failed activation");
+                return { success: false, state: this.state, error: `${message} The owner is still held and needs recovery.` };
             }
             this.state = "inactive";
             this.diagnosticGeneration++;
@@ -2144,7 +2197,7 @@ export class PluginVpnController {
 
     private async stopInternal(relaunch: boolean, options: { manual?: boolean } = {}): Promise<VpnOperationResult> {
         if (isLinux()) return this.stopLinuxInternal(relaunch);
-        if (!isSupportedWindowsArchitecture(process.platform, process.arch)) return { success: false, state: "blocked_external", error: "A VPN do plugin nesta versão exige Windows x64." };
+        if (!isSupportedWindowsArchitecture(process.platform, process.arch)) return { success: false, state: "blocked_external", error: "This plugin version's VPN requires Windows x64." };
         this.stopWatchdog();
         this.diagnosticGeneration++;
         // Restaurar rede é a única entrada manual deste caminho (#306): com o sinal
@@ -2176,7 +2229,7 @@ export class PluginVpnController {
         }
         if (!manual && inspection.active && inspection.owned && (!owner || owner.configPath !== this.serviceConfigPath || this.isLiveForeignOwner(owner))) {
             this.state = "recovery_required";
-            const error = "WireSock próprio detectado sem owner/configuração confirmados; ação manual necessária.";
+            const error = "The plugin's WireSock was detected with no confirmed owner or config. Manual action needed.";
             this.setDiagnostic("ownership", false, error);
             this.options.log("warn", "restauração recusada sem prova de owner/configuração próprios", { mode: "diagnostic-only" });
             return { success: false, state: this.state, error };
@@ -2197,8 +2250,8 @@ export class PluginVpnController {
                     this.options.log("info", "lock da VPN assumido por outra instância; nada a liberar");
                 } else {
                     this.state = "recovery_required";
-                    this.setDiagnostic("ownership", false, "não foi possível liberar o lock durante a restauração");
-                    return { success: false, state: this.state, error: "A rede está inativa, mas o lock da VPN ficou pendente." };
+                    this.setDiagnostic("ownership", false, "couldn't release the lock during restore");
+                    return { success: false, state: this.state, error: "The network is inactive, but the VPN lock is still held." };
                 }
             }
             this.state = "inactive";
@@ -2206,7 +2259,7 @@ export class PluginVpnController {
             return { success: true, state: this.state, message: this.statusMessage() };
         }
         if (inspection.reliable && inspection.active && !inspection.owned) {
-            const reason = inspection.reason || "WireSock externo está ativo; não será interrompido.";
+            const reason = inspection.reason || "An external WireSock is active and won't be stopped.";
             this.blockExternal(reason);
             return { success: false, state: this.state, error: this.externalReason || undefined };
         }
@@ -2215,9 +2268,9 @@ export class PluginVpnController {
         if (!cleanup.stopped) {
             await this.removeProbe({ sweep: false });
             this.state = "recovery_required";
-            const error = errorMessage(cleanup.error || "limpeza incompleta");
+            const error = errorMessage(cleanup.error || "incomplete cleanup");
             this.setDiagnostic("wireguard", false, error);
-            return { success: false, state: this.state, error: error || "Não foi possível restaurar a rede." };
+            return { success: false, state: this.state, error: error || "Couldn't restore the network." };
         }
         await this.removeProbe({ sweep: true });
         if (owner && !await this.releaseOwnership(owner)) {
@@ -2230,18 +2283,18 @@ export class PluginVpnController {
                 this.options.log("info", "lock da VPN assumido por outra instância; nada a liberar");
             } else {
                 this.state = "recovery_required";
-                this.setDiagnostic("ownership", false, "não foi possível liberar o lock durante a restauração");
-                return { success: false, state: this.state, error: "A rede foi restaurada, mas o lock da VPN ficou pendente." };
+                this.setDiagnostic("ownership", false, "couldn't release the lock during restore");
+                return { success: false, state: this.state, error: "The network was restored, but the VPN lock is still held." };
             }
         }
         this.discordPid = null;
         this.state = "inactive";
         this.externalReason = null;
-        this.setDiagnostic("wireguard", true, "serviço WireSock próprio parado e rede restaurada");
+        this.setDiagnostic("wireguard", true, "the plugin's WireSock service stopped and the network is restored");
         if (relaunch && !this.restarting) {
             if (!await this.requestRelaunch())
-                return { success: false, state: this.state, error: "A rede foi restaurada, mas não consegui reiniciar o Discord." };
-            return { success: true, state: "restart_pending", message: "Rede restaurada; o Discord será reiniciado." };
+                return { success: false, state: this.state, error: "The network was restored, but Discord couldn't restart." };
+            return { success: true, state: "restart_pending", message: "Network restored. Discord will restart." };
         }
         return { success: true, state: this.state, message: this.statusMessage() };
     }
@@ -2253,7 +2306,7 @@ export class PluginVpnController {
         const inspection = linux.inspectLinuxNetworkSync(owner);
         if (!inspection.reliable) {
             this.state = "recovery_required";
-            this.setDiagnostic("wireguard", false, inspection.reason || "não foi possível confirmar o namespace Linux");
+            this.setDiagnostic("wireguard", false, inspection.reason || "couldn't confirm the Linux namespace");
             return { success: false, state: this.state, error: inspection.reason || undefined };
         }
         const ownerPointsToProtectedResource = Boolean(
@@ -2264,13 +2317,13 @@ export class PluginVpnController {
         );
         if (inspection.externalConflict && (!owner || ownerPointsToProtectedResource)) {
             this.state = "blocked_external";
-            this.externalReason = inspection.reason || "interface ou namespace externo está ativo";
+            this.externalReason = inspection.reason || "an external interface or namespace is active";
             this.setDiagnostic("ownership", false, this.externalReason);
             return { success: false, state: this.state, error: this.externalReason };
         }
         if (owner && this.isLiveForeignOwner(owner)) {
             this.state = "blocked_external";
-            this.externalReason = "outra instância do GoLiveBypass ainda controla o namespace Linux";
+            this.externalReason = "another GoLiveBypass instance still controls the Linux namespace";
             this.setDiagnostic("ownership", false, this.externalReason);
             return { success: false, state: this.state, error: this.externalReason };
         }
@@ -2279,7 +2332,7 @@ export class PluginVpnController {
             || (inspection.namespace?.startsWith("gl-ns-") ? { namespace: inspection.namespace } : null);
         if (!cleanupTarget && inspection.active) {
             this.state = "recovery_required";
-            const detail = inspection.reason || "recurso Linux ativo sem owner seguro";
+            const detail = inspection.reason || "active Linux resource with no safe owner";
             this.setDiagnostic("ownership", false, detail);
             return { success: false, state: this.state, error: detail };
         }
@@ -2293,8 +2346,8 @@ export class PluginVpnController {
             const cleanup = await linux.stopLinuxNetwork(cleanupTarget, { log: this.options.log });
             if (!cleanup.stopped) {
                 this.state = "recovery_required";
-                this.setDiagnostic("wireguard", false, cleanup.error || "limpeza incompleta do namespace Linux");
-                return { success: false, state: this.state, error: cleanup.error || "Não foi possível restaurar a rede Linux." };
+                this.setDiagnostic("wireguard", false, cleanup.error || "incomplete Linux namespace cleanup");
+                return { success: false, state: this.state, error: cleanup.error || "Couldn't restore the Linux network." };
             }
             if (owner && !await this.releaseOwnership(owner)) {
                 // O relaunch Linux tambem deixa a instancia nova assumir o owner enquanto esta
@@ -2303,19 +2356,19 @@ export class PluginVpnController {
                     this.options.log("info", "owner Linux assumido por outra instância; nada a liberar");
                 } else {
                     this.state = "recovery_required";
-                    this.setDiagnostic("ownership", false, "não foi possível liberar o owner Linux durante a restauração");
-                    return { success: false, state: this.state, error: "A rede foi restaurada, mas o owner Linux ficou pendente." };
+                    this.setDiagnostic("ownership", false, "couldn't release the Linux owner during restore");
+                    return { success: false, state: this.state, error: "The network was restored, but the Linux owner is still held." };
                 }
             }
         }
         this.discordPid = null;
         this.state = "inactive";
         this.externalReason = null;
-        this.setDiagnostic("wireguard", true, "namespace WireGuard próprio removido e rede restaurada");
+        this.setDiagnostic("wireguard", true, "the plugin's WireGuard namespace removed and the network is restored");
         if (relaunch && !this.restarting) {
             if (!await this.requestRelaunch())
-                return { success: false, state: this.state, error: "A rede foi restaurada, mas não consegui relançar o Discord fora do namespace Linux." };
-            return { success: true, state: "restart_pending", message: "Rede restaurada; o Discord será relançado fora do namespace Linux." };
+                return { success: false, state: this.state, error: "The network was restored, but Discord couldn't be relaunched outside the Linux namespace." };
+            return { success: true, state: "restart_pending", message: "Network restored. Discord will relaunch outside the Linux namespace." };
         }
         return { success: true, state: this.state, message: this.statusMessage() };
     }
@@ -2325,7 +2378,7 @@ export class PluginVpnController {
         const inspection = linux.inspectLinuxNetworkSync(owner);
         if (!inspection.reliable) {
             this.state = "recovery_required";
-            this.setDiagnostic("wireguard", false, inspection.reason || "não foi possível confirmar o namespace Linux");
+            this.setDiagnostic("wireguard", false, inspection.reason || "couldn't confirm the Linux namespace");
             return { success: false, state: this.state, error: inspection.reason || undefined };
         }
         const ownerPointsToProtectedResource = Boolean(
@@ -2336,14 +2389,14 @@ export class PluginVpnController {
         );
         if (inspection.externalConflict && (!owner || ownerPointsToProtectedResource)) {
             this.state = "blocked_external";
-            this.externalReason = inspection.reason || "interface ou namespace externo está ativo";
+            this.externalReason = inspection.reason || "an external interface or namespace is active";
             this.setDiagnostic("ownership", false, this.externalReason);
             return { success: false, state: this.state, error: this.externalReason };
         }
         if (owner?.namespace && owner.interfaceName && inspection.active && inspection.owned) {
             if (owner.pid !== process.pid && this.isLiveForeignOwner(owner)) {
                 this.state = "blocked_external";
-                this.externalReason = "outra instância do GoLiveBypass ainda controla o namespace Linux";
+                this.externalReason = "another GoLiveBypass instance still controls the Linux namespace";
                 this.setDiagnostic("ownership", false, this.externalReason);
                 return { success: false, state: this.state, error: this.externalReason };
             }
@@ -2355,13 +2408,13 @@ export class PluginVpnController {
                 currentOwner.restarting = false;
                 await this.writeOwner(currentOwner).catch(() => {});
                 this.state = "active";
-                return { success: false, state: this.state, error: "Não consegui relançar o Discord dentro do namespace Linux." };
+                return { success: false, state: this.state, error: "Couldn't relaunch Discord inside the Linux namespace." };
             }
-            return { success: true, state: "restart_pending", message: "O Discord será relançado mantendo a rota WireGuard Linux." };
+            return { success: true, state: "restart_pending", message: "Discord will relaunch and keep the Linux WireGuard route." };
         }
         if (!await this.requestRelaunch(null))
-            return { success: false, state: this.state, error: "Não consegui relançar o Discord." };
-        return { success: true, state: "restart_pending", message: "O Discord será relançado para aplicar a atualização." };
+            return { success: false, state: this.state, error: "Couldn't relaunch Discord." };
+        return { success: true, state: "restart_pending", message: "Discord will relaunch to apply the update." };
     }
     private async restartInternal(): Promise<VpnOperationResult> {
         if (isLinux()) return this.restartLinuxInternal();
@@ -2371,18 +2424,14 @@ export class PluginVpnController {
             this.options.log("info", "reinício explícito preservou o WireSock externo; o plugin não é proprietário do túnel");
         }
         if (!await this.requestRelaunch())
-            return { success: false, state: this.state, error: "A rede foi restaurada, mas não consegui reiniciar o Discord." };
-        return { success: true, state: "restart_pending", message: "A rede foi restaurada; o Discord será reiniciado para aplicar a atualização." };
+            return { success: false, state: this.state, error: "The network was restored, but Discord couldn't restart." };
+        return { success: true, state: "restart_pending", message: "The network was restored. Discord will restart to apply the update." };
     }
 
     private discordAllowedApps(): string[] {
         const executable = path.resolve(process.execPath);
-        const appDir = path.dirname(executable);
-        const installRoot = path.dirname(appDir);
-        const updater = path.join(installRoot, "Update.exe");
-        const values = [executable];
-        if (fs.existsSync(updater)) values.push(path.resolve(updater));
-        return values;
+        // Sem o Update.exe: o updater não precisa do túnel e travava o splash com rota morta.
+        return [executable];
     }
 
     private prepareRouteProbe(): string | undefined {
@@ -2471,12 +2520,12 @@ export class PluginVpnController {
             const inspection = linux.inspectLinuxNetworkSync(owner);
             if (!isCurrent()) return;
             if (!inspection.reliable) {
-                this.setDiagnostic("wireguard", false, `${stage}: ${inspection.reason || "estado do namespace Linux desconhecido"}`);
+                this.setDiagnostic("wireguard", false, `${stage}: ${inspection.reason || "Linux namespace state unknown"}`);
                 this.options.log("warn", "diagnóstico Linux não conseguiu confirmar o namespace", { stage, mode: "diagnostic-only" });
                 return;
             }
             const ok = inspection.active && inspection.owned;
-            this.setDiagnostic("wireguard", ok, `${stage}: ${ok ? "namespace e interface WireGuard confirmados" : inspection.reason || "namespace ou interface WireGuard ausente"}`);
+            this.setDiagnostic("wireguard", ok, `${stage}: ${ok ? "WireGuard namespace and interface confirmed" : inspection.reason || "WireGuard namespace or interface missing"}`);
             if (!ok) this.options.log("warn", "diagnóstico Linux observou estado incompleto", { stage, mode: "diagnostic-only" });
             return;
         }
@@ -2493,7 +2542,7 @@ export class PluginVpnController {
         if (!probePath || !fs.existsSync(probePath)) return;
         const flight = windows.runRouteProbe(probePath).then(result => {
             if (!isCurrent()) return;
-            this.setDiagnostic("route", Boolean(result?.success), safeDiagnosticDetail(JSON.stringify(result || { error: "resposta vazia" }), 500));
+            this.setDiagnostic("route", Boolean(result?.success), safeDiagnosticDetail(JSON.stringify(result || { error: "empty response" }), 500));
             this.options.log(result?.success ? "info" : "warn", "probe de rota do Discord concluído", { stage, result: safeDiagnosticDetail(JSON.stringify(result || {}), 500), mode: "log-only" });
         }).catch(error => {
             if (!isCurrent()) return;
@@ -2516,12 +2565,12 @@ export class PluginVpnController {
             const inspection = linux.inspectLinuxNetworkSync(owner);
             if (!isCurrent()) return;
             if (!inspection.reliable) {
-                this.setDiagnostic("wireguard", false, inspection.reason || "estado do namespace Linux desconhecido");
+                this.setDiagnostic("wireguard", false, inspection.reason || "Linux namespace state unknown");
                 this.options.log("warn", "watchdog Linux não conseguiu confirmar a VPN", { mode: "diagnostic-only" });
                 return;
             }
             const ok = inspection.active && inspection.owned;
-            this.setDiagnostic("wireguard", ok, ok ? "namespace WireGuard próprio confirmado" : inspection.reason || "namespace WireGuard ausente");
+            this.setDiagnostic("wireguard", ok, ok ? "the plugin's WireGuard namespace confirmed" : inspection.reason || "WireGuard namespace missing");
             if (!ok) this.options.log("warn", "watchdog Linux observou perda ou troca do túnel", { mode: "diagnostic-only" });
             if (ok) this.startDiagnostics("watchdog");
         } finally {
@@ -2544,7 +2593,7 @@ export class PluginVpnController {
         try {
             const inspection = await windows.inspectWireSockAsync(this.serviceConfigPath);
             if (!inspection.reliable) {
-                if (isCurrent()) this.setDiagnostic("wireguard", false, inspection.reason || "Estado do WireSock desconhecido.");
+                if (isCurrent()) this.setDiagnostic("wireguard", false, inspection.reason || "WireSock state unknown.");
                 this.options.log("warn", "watchdog não conseguiu confirmar o estado do WireSock", { mode: "diagnostic-only" });
                 return;
             }
@@ -2559,7 +2608,7 @@ export class PluginVpnController {
                     confirmation = await windows.inspectWireSockAsync(this.serviceConfigPath);
                 }
                 if (!confirmation.reliable) {
-                    if (isCurrent()) this.setDiagnostic("wireguard", false, confirmation.reason || "Estado do WireSock desconhecido.");
+                    if (isCurrent()) this.setDiagnostic("wireguard", false, confirmation.reason || "WireSock state unknown.");
                     this.options.log("warn", "watchdog não confirmou ausência do WireSock porque a leitura ficou desconhecida", { mode: "diagnostic-only" });
                     return;
                 }
@@ -2574,7 +2623,7 @@ export class PluginVpnController {
                         const recheck = await windows.inspectWireSockUntilReliableAsync(this.serviceConfigPath, this.guiConfigPath);
                         if (!isCurrent()) return;
                         if (!recheck.reliable) {
-                            this.setDiagnostic("wireguard", false, recheck.reason || "Estado do WireSock desconhecido.");
+                            this.setDiagnostic("wireguard", false, recheck.reason || "WireSock state unknown.");
                             this.options.log("warn", "watchdog não re-adoptou a sessão própria porque a leitura continuou desconhecida", { mode: "diagnostic-only" });
                             return;
                         }
@@ -2603,7 +2652,7 @@ export class PluginVpnController {
                     this.discordPid = null;
                     this.externalReason = null;
                     this.stopWatchdog();
-                    this.setDiagnostic("wireguard", false, "serviço WireSock próprio desapareceu");
+                    this.setDiagnostic("wireguard", false, "the plugin's WireSock service disappeared");
                     this.options.log("warn", "watchdog não confirmou o WireSock próprio", {
                         mode: "diagnostic-only",
                         services: confirmation.services,
@@ -2612,7 +2661,7 @@ export class PluginVpnController {
                     return;
                 }
                 if (!confirmation.owned) {
-                    this.blockExternal(confirmation.reason || "ownership do WireSock mudou");
+                    this.blockExternal(confirmation.reason || "WireSock ownership changed");
                     return;
                 }
                 this.options.log("warn", "watchdog ignorou leitura transitória do WireSock", { mode: "diagnostic-only" });
@@ -2620,7 +2669,7 @@ export class PluginVpnController {
                 return;
             }
             if (!inspection.owned) {
-                this.blockExternal(inspection.reason || "ownership do WireSock mudou");
+                this.blockExternal(inspection.reason || "WireSock ownership changed");
                 return;
             }
             this.startDiagnostics("watchdog");
@@ -2711,17 +2760,17 @@ export class PluginVpnController {
             } catch (error) {
                 if (created) {
                     try { fs.rmSync(mutexPath, { recursive: true, force: true }); } catch { }
-                    throw new Error(`Não foi possível preparar o mutex de ownership: ${errorMessage(error)}`);
+                    throw new Error(`Couldn't prepare the ownership mutex: ${errorMessage(error)}`);
                 }
                 const code = (error as { code?: unknown })?.code;
-                if (code !== "EEXIST") throw new Error(`Não foi possível acessar o mutex de ownership: ${errorMessage(error)}`);
+                if (code !== "EEXIST") throw new Error(`Couldn't access the ownership mutex: ${errorMessage(error)}`);
                 if (this.reclaimStaleOwnerMutex(mutexPath)) continue;
                 if (attempt + 1 >= OWNER_MUTEX_MAX_ATTEMPTS)
-                    throw new Error("Outra operação de ownership da VPN está em andamento; tente novamente.");
+                    throw new Error("Another VPN ownership operation is running. Try again.");
                 await new Promise<void>(resolve => setTimeout(resolve, OWNER_MUTEX_RETRY_MS));
             }
         }
-        throw new Error("Não foi possível reservar o mutex de ownership da VPN.");
+        throw new Error("Couldn't reserve the VPN ownership mutex.");
     }
 
     private releaseOwnerMutex(lease: { path: string; token: string }): void {
@@ -2759,8 +2808,8 @@ export class PluginVpnController {
             this.restarting = true;
             if (isLinux()) {
                 const { requestRelaunch } = this.options;
-                if (!requestRelaunch) throw new Error("o bridge nativo não forneceu relaunch Linux");
-                if (!await requestRelaunch(targetNamespace)) throw new Error("o bridge nativo recusou o relaunch Linux");
+                if (!requestRelaunch) throw new Error("the native bridge didn't provide a Linux relaunch");
+                if (!await requestRelaunch(targetNamespace)) throw new Error("the native bridge refused the Linux relaunch");
             } else {
                 app.relaunch();
                 app.exit(0);
@@ -2780,20 +2829,20 @@ export class PluginVpnController {
     }
 
     private async claimActiveOwnership(previous: VpnOwnerRecord | null, inspection: windows.WireSockInspection): Promise<VpnOwnerRecord> {
-        if (this.isLiveForeignOwner(previous)) throw new Error("Outra instância do GoLiveBypass já controla a VPN.");
+        if (this.isLiveForeignOwner(previous)) throw new Error("Another GoLiveBypass instance already controls the VPN.");
         return this.adoptOwnership(previous, inspection);
     }
 
     private async acquireLinuxOwnership(): Promise<VpnOwnerRecord> {
         return this.withOwnerMutex(async () => {
             const existing = this.readOwner();
-            if (this.isLiveForeignOwner(existing)) throw new Error("Outra instância do GoLiveBypass já controla a VPN.");
+            if (this.isLiveForeignOwner(existing)) throw new Error("Another GoLiveBypass instance already controls the VPN.");
             if (!existing && fs.existsSync(this.ownerPath)) this.quarantineInvalidOwnerUnlocked();
             const suffix = `${process.pid.toString(36)}${this.generation.toString(36)}${randomUUID().replaceAll("-", "").slice(0, 8)}`;
             const namespace = `glb-${suffix}`.slice(0, 31);
             const interfaceName = `glbwg${suffix}`.slice(0, 15);
             if (!linux.isValidLinuxName(namespace, 31) || !linux.isValidLinuxName(interfaceName, 15))
-                throw new Error("não foi possível criar nomes seguros para o namespace Linux");
+                throw new Error("couldn't create safe names for the Linux namespace");
             const owner: VpnOwnerRecord = {
                 kind: VPN_OWNER_KIND,
                 pid: process.pid,
@@ -2812,12 +2861,12 @@ export class PluginVpnController {
     }
 
     private async adoptLinuxOwnership(previous: VpnOwnerRecord): Promise<VpnOwnerRecord> {
-        if (!previous.namespace || !previous.interfaceName) throw new Error("owner Linux sem namespace ou interface");
+        if (!previous.namespace || !previous.interfaceName) throw new Error("Linux owner has no namespace or interface");
         return this.withOwnerMutex(async () => {
             const current = this.readOwner();
-            if (this.isLiveForeignOwner(current)) throw new Error("Outra instância do GoLiveBypass já controla a VPN.");
+            if (this.isLiveForeignOwner(current)) throw new Error("Another GoLiveBypass instance already controls the VPN.");
             const source = current ?? previous;
-            if (!source.namespace || !source.interfaceName) throw new Error("owner Linux sem namespace ou interface");
+            if (!source.namespace || !source.interfaceName) throw new Error("Linux owner has no namespace or interface");
             const adopted = {
                 ...source,
                 pid: process.pid,
@@ -2843,15 +2892,15 @@ export class PluginVpnController {
             const managedConflict = inspection.reliable && inspection.active && !inspection.owned
                 && (inspection.origin === "gui" || inspection.origin === "managed");
             if (inspection.reliable && inspection.active && !inspection.owned && !managedConflict)
-                throw new Error(inspection.reason || "WireSock externo está ativo.");
-            if (this.isLiveForeignOwner(existing)) throw new Error("Outra instância do GoLiveBypass já controla a VPN.");
+                throw new Error(inspection.reason || "An external WireSock is active.");
+            if (this.isLiveForeignOwner(existing)) throw new Error("Another GoLiveBypass instance already controls the VPN.");
             if (existing?.pid === process.pid) {
                 this.probePath = existing.probePath;
                 this.ownershipToken = ownershipToken(existing);
                 return existing;
             }
             if (inspection.active && inspection.owned) {
-                if (!existing && ownerFileExists) throw new Error("O lock da VPN está inválido; a sessão ativa foi preservada para recuperação manual.");
+                if (!existing && ownerFileExists) throw new Error("The VPN lock is invalid. The active session was kept for manual recovery.");
                 const source = existing ?? {
                     kind: VPN_OWNER_KIND,
                     pid: process.pid,
@@ -2887,9 +2936,9 @@ export class PluginVpnController {
         if (isUnknownWireSockInspection(inspection)) throw new Error(unknownWireSockMessage(inspection));
         return this.withOwnerMutex(async () => {
             const current = this.readOwner();
-            if (this.isLiveForeignOwner(current)) throw new Error("Outra instância do GoLiveBypass já controla a VPN.");
+            if (this.isLiveForeignOwner(current)) throw new Error("Another GoLiveBypass instance already controls the VPN.");
             if (!current && fs.existsSync(this.ownerPath))
-                throw new Error("O lock da VPN está inválido; a sessão ativa foi preservada para recuperação manual.");
+                throw new Error("The VPN lock is invalid. The active session was kept for manual recovery.");
             const source: VpnOwnerRecord = current ?? previous ?? {
                 kind: VPN_OWNER_KIND,
                 pid: process.pid,
@@ -2959,7 +3008,7 @@ export class PluginVpnController {
         await this.withOwnerMutex(async () => {
             if (expected) {
                 const current = this.readOwner();
-                if (!current || !sameOwnership(expected, current)) throw new Error("ownership da VPN mudou durante a operação");
+                if (!current || !sameOwnership(expected, current)) throw new Error("VPN ownership changed during the operation");
             }
             this.writeOwnerUnlocked(owner);
             this.ownershipToken = ownershipToken(owner);
@@ -3093,11 +3142,11 @@ export class PluginVpnController {
                     const raw = fs.readFileSync(temporary, "utf8");
                     if (file === PROFILE_FILE) {
                         const validation = windows.validateWireGuardProfile(raw);
-                        if (!validation.valid) throw new Error(validation.error || "perfil WireGuard inválido");
+                        if (!validation.valid) throw new Error(validation.error || "invalid WireGuard profile");
                     } else {
                         const session = JSON.parse(raw) as unknown;
                         if (session === null || typeof session !== "object" || Array.isArray(session))
-                            throw new Error("sessão Proton inválida");
+                            throw new Error("invalid Proton session");
                     }
                     fs.renameSync(temporary, target);
                     imported.push(file);

@@ -123,14 +123,14 @@ export const MEASUREMENT_CRITERION_VERSION = 6;
 const MAX_STDOUT_BYTES = 512 * 1024;
 const MAX_STDERR_BYTES = 512 * 1024;
 const MAX_PROTON_USERNAME_LENGTH = 320;
-const GENERIC_PLAN_ERROR = "Não foi possível confirmar o plano Proton.";
-const ACCOUNT_MISMATCH_ERROR = "A resposta do Proton não corresponde ao usuário solicitado.";
-const LOGIN_CANCELLED_ERROR = "O login Proton foi cancelado.";
-const HELPER_ERROR_MESSAGE = "O componente ProtonVPN falhou antes de concluir o login. Reinicie o Discord e tente novamente.";
-const MISSING_EXECUTABLE_MESSAGE = "O componente ProtonVPN não foi encontrado nesta instalação.";
-const INVALID_CATALOG_ERROR = "O catálogo de rotas ProtonVPN retornou dados inválidos.";
-const EMPTY_CATALOG_ERROR = "Nenhuma rota ProtonVPN está disponível para esta conta.";
-const MANUAL_ROUTE_FAILURE_ERROR = "Não foi possível validar a rota ProtonVPN selecionada.";
+const GENERIC_PLAN_ERROR = "Couldn't confirm the Proton plan.";
+const ACCOUNT_MISMATCH_ERROR = "Proton's response doesn't match the requested user.";
+const LOGIN_CANCELLED_ERROR = "Proton sign-in was cancelled.";
+const HELPER_ERROR_MESSAGE = "The ProtonVPN component failed before finishing sign-in. Restart Discord and try again.";
+const MISSING_EXECUTABLE_MESSAGE = "The ProtonVPN component is missing from this install.";
+const INVALID_CATALOG_ERROR = "The ProtonVPN route catalog returned invalid data.";
+const EMPTY_CATALOG_ERROR = "No ProtonVPN route is available for this account.";
+const MANUAL_ROUTE_FAILURE_ERROR = "Couldn't validate the selected ProtonVPN route.";
 /** Acima disso a medição não prova que a rota responde: vale como sem ping. */
 const MAX_VALID_PING_MS = 999;
 const MAX_ROUTE_TEXT_LENGTH = 200;
@@ -356,7 +356,7 @@ function ensureEmbeddedLinuxRuntimeDirectory(directory: string): string {
     const { root } = path.parse(current);
     while (current !== root) {
         try {
-            if (fs.lstatSync(current).isSymbolicLink()) throw new Error("diretório de runtime do plugin contém link simbólico");
+            if (fs.lstatSync(current).isSymbolicLink()) throw new Error("the plugin's runtime folder contains a symbolic link");
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
@@ -364,13 +364,13 @@ function ensureEmbeddedLinuxRuntimeDirectory(directory: string): string {
     }
     fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
     const stat = fs.lstatSync(resolved);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("diretório de runtime do plugin inválido");
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("the plugin's runtime folder isn't usable");
     fs.chmodSync(resolved, 0o700);
     return resolved;
 }
 
 export function materializeEmbeddedLinuxAsset(name: EmbeddedLinuxAssetName, directory: string): string {
-    if (process.platform !== "linux" || process.arch !== "x64") throw new Error("asset Linux solicitado fora do Linux x64");
+    if (process.platform !== "linux" || process.arch !== "x64") throw new Error("Linux asset requested outside Linux x64");
     const asset = EMBEDDED_LINUX_ASSETS[name];
     const targetDirectory = ensureEmbeddedLinuxRuntimeDirectory(directory);
     const cacheKey = `${targetDirectory}/${name}`;
@@ -385,7 +385,7 @@ export function materializeEmbeddedLinuxAsset(name: EmbeddedLinuxAssetName, dire
 
     const payload = gunzipSync(Buffer.from(asset.gzipBase64, "base64"));
     const digest = createHash("sha256").update(payload).digest("hex");
-    if (digest !== asset.sha256) throw new Error(`asset Linux ${name} falhou na verificação de integridade`);
+    if (digest !== asset.sha256) throw new Error(`Linux asset ${name} failed its integrity check`);
 
     const staging = path.join(targetDirectory, `.golive-runtime-${name}-${randomUUID()}.tmp`);
     let fd: number | undefined;
@@ -402,7 +402,7 @@ export function materializeEmbeddedLinuxAsset(name: EmbeddedLinuxAssetName, dire
             if (isUsableEmbeddedLinuxExecutable(target, asset.sha256)) return target;
             throw error;
         }
-        if (!isUsableEmbeddedLinuxExecutable(target, asset.sha256)) throw new Error(`asset Linux ${name} não ficou executável`);
+        if (!isUsableEmbeddedLinuxExecutable(target, asset.sha256)) throw new Error(`Linux asset ${name} didn't become executable`);
         materializedEmbeddedLinuxAssets.set(cacheKey, target);
         return target;
     } finally {
@@ -418,7 +418,7 @@ function logError(error: unknown): string {
 }
 
 function abortError(): Error {
-    const error = new Error("Operação Proton cancelada.");
+    const error = new Error("Proton operation cancelled.");
     error.name = "AbortError";
     return error;
 }
@@ -506,7 +506,7 @@ export function findProtonConfgenExe(runtimeDirectory?: string): string {
     if (process.platform === "linux" && process.arch === "x64" && runtimeDirectory) {
         try { return materializeEmbeddedLinuxAsset("proton-confgen", runtimeDirectory); } catch {}
     }
-    throw new Error("O executável proton-confgen não foi encontrado no pacote do plugin.");
+    throw new Error("The proton-confgen executable was not found in the plugin package.");
 }
 
 function validProgress(value: unknown): ProtonOptimizationProgress | null {
@@ -565,7 +565,7 @@ export function runConfgen(options: RunConfgenOptions): Promise<ConfgenResult> {
         let executable: string;
         try {
             executable = path.resolve(options.exePath || findProtonConfgenExe(options.runtimeDirectory));
-            if (!isUsableConfgenExecutable(executable)) throw new Error("O executável proton-confgen não foi encontrado ou é inválido.");
+            if (!isUsableConfgenExecutable(executable)) throw new Error("The proton-confgen executable was not found or is invalid.");
         }
         catch (error) { reject(error); return; }
 
@@ -633,7 +633,7 @@ export function runConfgen(options: RunConfgenOptions): Promise<ConfgenResult> {
             killTimer = setTimeout(() => { if (!settled) { try { child.kill("SIGKILL"); } catch {} } }, 1000);
             killTimer.unref?.();
         };
-        const timer = setTimeout(() => kill(new Error(`Tempo limite excedido (${Math.round(timeoutMs / 1000)}s) ao executar proton-confgen.`)), timeoutMs);
+        const timer = setTimeout(() => kill(new Error(`Timed out (${Math.round(timeoutMs / 1000)}s) running proton-confgen.`)), timeoutMs);
         timer.unref?.();
         const abort = () => { aborted = true; kill(abortError()); };
         options.signal?.addEventListener("abort", abort, { once: true });
@@ -687,14 +687,14 @@ export function classifyProtonError(error: unknown, stderr = "", stdout = ""): {
     const structured = classifyStructuredProtonCode(error);
     if (structured) return structured;
     const raw = `${error instanceof Error ? error.message : String(error)} ${stderr} ${stdout}`.toLowerCase();
-    if (/captcha[_\s-]*(?:cancelled|canceled)|human verification.*cancel/.test(raw)) return { code: "CAPTCHA_CANCELLED", message: "A verificação Proton foi cancelada.", retryable: true };
-    if (/captcha_invalid|captcha.*expired|human verification.*(invalid|expired)/.test(raw)) return { code: "CAPTCHA_INVALID", message: "A verificação de segurança expirou ou foi recusada.", retryable: true };
-    if (/captcha_required|captcha verification required|human verification required|code 9001/.test(raw)) return { code: "CAPTCHA_REQUIRED", message: "O Proton solicitou uma verificação de segurança.", retryable: true };
-    if (/\b9100\b/.test(raw)) return { code: "TWO_FACTOR_REQUIRED", message: "Esta conta exige autenticação em duas etapas.", retryable: false };
+    if (/captcha[_\s-]*(?:cancelled|canceled)|human verification.*cancel/.test(raw)) return { code: "CAPTCHA_CANCELLED", message: "The Proton check was cancelled.", retryable: true };
+    if (/captcha_invalid|captcha.*expired|human verification.*(invalid|expired)/.test(raw)) return { code: "CAPTCHA_INVALID", message: "The security check expired or was refused.", retryable: true };
+    if (/captcha_required|captcha verification required|human verification required|code 9001/.test(raw)) return { code: "CAPTCHA_REQUIRED", message: "Proton asked for a security check.", retryable: true };
+    if (/\b9100\b/.test(raw)) return { code: "TWO_FACTOR_REQUIRED", message: "This account needs two-factor authentication.", retryable: false };
     const mentionsTwoFactor = /(?:\b2fa\b|two[\s_-]*factor|totp|verification code)/.test(raw);
-    if (mentionsTwoFactor && /required|necessar|need(?:ed)?|exig/.test(raw)) return { code: "TWO_FACTOR_REQUIRED", message: "Esta conta exige autenticação em duas etapas.", retryable: false };
-    if (mentionsTwoFactor) return { code: "TWO_FACTOR_INVALID", message: "O código 2FA está incorreto ou expirou.", retryable: false };
-    if (/invalid credential|invalid password|wrong password|incorrect/.test(raw)) return { code: "INVALID_CREDENTIALS", message: "Usuário ou senha incorretos.", retryable: false };
+    if (mentionsTwoFactor && /required|necessar|need(?:ed)?|exig/.test(raw)) return { code: "TWO_FACTOR_REQUIRED", message: "This account needs two-factor authentication.", retryable: false };
+    if (mentionsTwoFactor) return { code: "TWO_FACTOR_INVALID", message: "The 2FA code is wrong or expired.", retryable: false };
+    if (/invalid credential|invalid password|wrong password|incorrect/.test(raw)) return { code: "INVALID_CREDENTIALS", message: "Wrong username or password.", retryable: false };
     // O helper foi encontrado, mas o processo não chegou a concluir: spawn
     // recusado, tubo quebrado ou resposta ilegível é falha do componente,
     // nunca credencial. O executável ausente continua em MISSING_EXECUTABLE.
@@ -702,29 +702,29 @@ export function classifyProtonError(error: unknown, stderr = "", stdout = ""): {
         if (/enoent|not found|não foi encontrado/.test(raw)) return { code: "MISSING_EXECUTABLE", message: MISSING_EXECUTABLE_MESSAGE, retryable: false };
         return { code: "HELPER_ERROR", message: HELPER_ERROR_MESSAGE, retryable: true };
     }
-    if (/secret[\s_-]*service|libsecret|safestorage|eacces|eperm|eexist|enotdir|not a directory|permission denied|access denied|read[- ]only|no space left|disk full|session.{0,80}(?:save|write|persistence|protect|decrypt|migrat|remove|delete)|(?:save|write|protect|decrypt|migrat|remove|delete).{0,80}session/.test(raw)) return { code: "SESSION_PERSISTENCE", message: "Não foi possível acessar o armazenamento local da sessão Proton.", retryable: true };
-    if (/timeout|tempo limite|timed out/.test(raw)) return { code: "TIMEOUT", message: "O ProtonVPN demorou demais para responder.", retryable: true };
+    if (/secret[\s_-]*service|libsecret|safestorage|eacces|eperm|eexist|enotdir|not a directory|permission denied|access denied|read[- ]only|no space left|disk full|session.{0,80}(?:save|write|persistence|protect|decrypt|migrat|remove|delete)|(?:save|write|protect|decrypt|migrat|remove|delete).{0,80}session/.test(raw)) return { code: "SESSION_PERSISTENCE", message: "Couldn't reach the local Proton session storage.", retryable: true };
+    if (/timeout|tempo limite|timed out/.test(raw)) return { code: "TIMEOUT", message: "ProtonVPN took too long to respond.", retryable: true };
     if (/not found|enoent|não foi encontrado/.test(raw)) return { code: "MISSING_EXECUTABLE", message: MISSING_EXECUTABLE_MESSAGE, retryable: false };
-    if (/network|connection|dns|tls|temporar|unreachable|reset/.test(raw)) return { code: "NETWORK_ERROR", message: "Não foi possível conectar aos servidores ProtonVPN.", retryable: true };
-    return { code: "UNKNOWN", message: "Não foi possível concluir a operação ProtonVPN.", retryable: true };
+    if (/network|connection|dns|tls|temporar|unreachable|reset/.test(raw)) return { code: "NETWORK_ERROR", message: "Couldn't reach the ProtonVPN servers.", retryable: true };
+    return { code: "UNKNOWN", message: "Couldn't finish the ProtonVPN operation.", retryable: true };
 }
 
 function classifyStructuredProtonCode(value: unknown): { code: ProtonLoginErrorCode; message: string; retryable: boolean } | null {
     if (typeof value !== "string") return null;
     switch (value.trim().toUpperCase()) {
-        case "CAPTCHA_REQUIRED": return { code: "CAPTCHA_REQUIRED", message: "O Proton solicitou uma verificação de segurança.", retryable: true };
-        case "CAPTCHA_INVALID": return { code: "CAPTCHA_INVALID", message: "A verificação de segurança expirou ou foi recusada.", retryable: true };
-        case "CAPTCHA_CANCELLED": return { code: "CAPTCHA_CANCELLED", message: "A verificação Proton foi cancelada.", retryable: true };
-        case "TWO_FACTOR_REQUIRED": return { code: "TWO_FACTOR_REQUIRED", message: "Esta conta exige autenticação em duas etapas.", retryable: false };
-        case "TWO_FACTOR_INVALID": return { code: "TWO_FACTOR_INVALID", message: "O código 2FA está incorreto ou expirou.", retryable: false };
-        case "INVALID_CREDENTIALS": return { code: "INVALID_CREDENTIALS", message: "Usuário ou senha incorretos.", retryable: false };
-        case "NETWORK_ERROR": return { code: "NETWORK_ERROR", message: "Não foi possível conectar aos servidores ProtonVPN.", retryable: true };
-        case "TIMEOUT": return { code: "TIMEOUT", message: "O ProtonVPN demorou demais para responder.", retryable: true };
-        case "MISSING_EXECUTABLE": return { code: "MISSING_EXECUTABLE", message: "O componente ProtonVPN não foi encontrado nesta instalação.", retryable: false };
-        case "SESSION_PERSISTENCE": return { code: "SESSION_PERSISTENCE", message: "Não foi possível acessar o armazenamento local da sessão Proton.", retryable: true };
+        case "CAPTCHA_REQUIRED": return { code: "CAPTCHA_REQUIRED", message: "Proton asked for a security check.", retryable: true };
+        case "CAPTCHA_INVALID": return { code: "CAPTCHA_INVALID", message: "The security check expired or was refused.", retryable: true };
+        case "CAPTCHA_CANCELLED": return { code: "CAPTCHA_CANCELLED", message: "The Proton check was cancelled.", retryable: true };
+        case "TWO_FACTOR_REQUIRED": return { code: "TWO_FACTOR_REQUIRED", message: "This account needs two-factor authentication.", retryable: false };
+        case "TWO_FACTOR_INVALID": return { code: "TWO_FACTOR_INVALID", message: "The 2FA code is wrong or expired.", retryable: false };
+        case "INVALID_CREDENTIALS": return { code: "INVALID_CREDENTIALS", message: "Wrong username or password.", retryable: false };
+        case "NETWORK_ERROR": return { code: "NETWORK_ERROR", message: "Couldn't reach the ProtonVPN servers.", retryable: true };
+        case "TIMEOUT": return { code: "TIMEOUT", message: "ProtonVPN took too long to respond.", retryable: true };
+        case "MISSING_EXECUTABLE": return { code: "MISSING_EXECUTABLE", message: "The ProtonVPN component is missing from this install.", retryable: false };
+        case "SESSION_PERSISTENCE": return { code: "SESSION_PERSISTENCE", message: "Couldn't reach the local Proton session storage.", retryable: true };
         case "HELPER_ERROR": return { code: "HELPER_ERROR", message: HELPER_ERROR_MESSAGE, retryable: true };
-        case "CONFIGURATION_ERROR": return { code: "CONFIGURATION_ERROR", message: "A configuração da conta Proton está incompleta.", retryable: false };
-        case "UNKNOWN": return { code: "UNKNOWN", message: "Não foi possível concluir a operação ProtonVPN.", retryable: true };
+        case "CONFIGURATION_ERROR": return { code: "CONFIGURATION_ERROR", message: "The Proton account setup is incomplete.", retryable: false };
+        case "UNKNOWN": return { code: "UNKNOWN", message: "Couldn't finish the ProtonVPN operation.", retryable: true };
         default: return null;
     }
 }
@@ -743,7 +743,7 @@ function temporaryProtonSessionFile(dataDir: string): string {
 const PROTON_ENVELOPE_FORMAT = "electron-safe-storage";
 const PROTON_ENVELOPE_VERSION = 1;
 const SAFE_STORAGE_UNAVAILABLE_MESSAGE =
-    "O armazenamento seguro do sistema (Secret Service / libsecret) não está disponível para proteger a sessão Proton.";
+    "The system's secure storage (Secret Service / libsecret) isn't available to protect the Proton session.";
 
 interface ProtonSessionEnvelope {
     version: number;
@@ -813,7 +813,7 @@ function decryptProtonSession(envelopeRaw: string): string {
     try {
         parsed = JSON.parse(envelopeRaw);
     } catch {
-        throw new Error("A sessão Proton armazenada está corrompida ou ilegível.");
+        throw new Error("Stored Proton sign-in data is corrupted or unreadable.");
     }
     if (
         !parsed ||
@@ -823,13 +823,13 @@ function decryptProtonSession(envelopeRaw: string): string {
         typeof (parsed as ProtonSessionEnvelope).ciphertext !== "string" ||
         !(parsed as ProtonSessionEnvelope).ciphertext.trim()
     ) {
-        throw new Error("A sessão Proton armazenada não está no formato cifrado seguro.");
+        throw new Error("Stored Proton sign-in data isn't in the secure encrypted format.");
     }
     try {
         const buffer = Buffer.from((parsed as ProtonSessionEnvelope).ciphertext, "base64");
         return storage.decryptString(buffer);
     } catch {
-        throw new Error("Não foi possível decifrar a sessão Proton com o armazenamento seguro do sistema.");
+        throw new Error("Couldn't read the stored Proton sign-in data with the system's secure storage.");
     }
 }
 
@@ -974,7 +974,7 @@ async function withProtonSession<T>(
     if (availability === "memory") return withMaterializedProtonSessionPlain(dataDir, readRememberedProtonSession(dataDir) ?? "", operation);
     if (availability === "encrypted") return withMaterializedProtonSession(dataDir, operation);
     if (availability === "plain") return operation(protonSessionFile(dataDir), () => {});
-    throw new Error("Sessão Proton não encontrada.");
+    throw new Error("No saved Proton sign-in.");
 }
 
 // Grava a sessão recém-autenticada. Sem armazenamento seguro no Linux nada em
@@ -1002,7 +1002,7 @@ async function withMaterializedProtonSession<T>(
 ): Promise<T> {
     const canonical = protonSessionFile(dataDir);
     if (!isUsableSessionFile(canonical)) {
-        throw new Error("A sessão Proton armazenada não é um arquivo regular.");
+        throw new Error("Stored Proton sign-in data isn't a regular file.");
     }
     const rawEnvelope = fs.readFileSync(canonical, "utf8");
     const plainText = decryptProtonSession(rawEnvelope);
@@ -1032,7 +1032,7 @@ function withMaterializedProtonSessionSync<T>(
 ): T {
     const canonical = protonSessionFile(dataDir);
     if (!isUsableSessionFile(canonical)) {
-        throw new Error("A sessão Proton armazenada não é um arquivo regular.");
+        throw new Error("Stored Proton sign-in data isn't a regular file.");
     }
     const rawEnvelope = fs.readFileSync(canonical, "utf8");
     const plainText = decryptProtonSession(rawEnvelope);
@@ -1120,12 +1120,12 @@ function deleteSessionArtifacts(dataDir: string): boolean {
 
 function sessionCheckFailure(rawValue: unknown): { code: ProtonSessionCheckCode; error: string } {
     const raw = safeDiagnosticDetail(rawValue, 600).toLowerCase();
-    if (/timeout|tempo limite|timed out/.test(raw)) return { code: "TIMEOUT", error: "A verificação da sessão Proton demorou demais." };
-    if (/not found|enoent|spawn|não foi encontrado/.test(raw)) return { code: "MISSING_EXECUTABLE", error: "O componente ProtonVPN não foi encontrado nesta instalação." };
-    if (/secret[\s_-]*service|libsecret|safestorage|eacces|eperm|eexist|enotdir|not a directory|permission denied|access denied|read[- ]only|no space left|disk full|session.{0,80}(?:save|write|persistence|protect|decrypt|migrat|remove|delete)|(?:save|write|protect|decrypt|migrat|remove|delete).{0,80}session/.test(raw)) return { code: "SESSION_PERSISTENCE", error: "Não foi possível acessar o armazenamento local da sessão Proton." };
-    if (/network|connection|dns|tls|temporar|unreachable|reset|servidor|rede/.test(raw)) return { code: "NETWORK_ERROR", error: "Não foi possível verificar a sessão Proton por causa da rede." };
-    if (/invalid|expired|session|token|unauthori[sz]ed|authentication/.test(raw)) return { code: "INVALID_SESSION", error: "A sessão Proton está inválida ou expirada." };
-    return { code: "UNKNOWN", error: "Não foi possível verificar a sessão Proton." };
+    if (/timeout|tempo limite|timed out/.test(raw)) return { code: "TIMEOUT", error: "The Proton session check took too long." };
+    if (/not found|enoent|spawn|não foi encontrado/.test(raw)) return { code: "MISSING_EXECUTABLE", error: "The ProtonVPN component is missing from this install." };
+    if (/secret[\s_-]*service|libsecret|safestorage|eacces|eperm|eexist|enotdir|not a directory|permission denied|access denied|read[- ]only|no space left|disk full|session.{0,80}(?:save|write|persistence|protect|decrypt|migrat|remove|delete)|(?:save|write|protect|decrypt|migrat|remove|delete).{0,80}session/.test(raw)) return { code: "SESSION_PERSISTENCE", error: "Couldn't reach the local Proton session storage." };
+    if (/network|connection|dns|tls|temporar|unreachable|reset|servidor|rede/.test(raw)) return { code: "NETWORK_ERROR", error: "Couldn't check the Proton session because of the network." };
+    if (/invalid|expired|session|token|unauthori[sz]ed|authentication/.test(raw)) return { code: "INVALID_SESSION", error: "The Proton session is invalid or expired." };
+    return { code: "UNKNOWN", error: "Couldn't check the Proton session." };
 }
 
 export function parseCaptchaUrl(rawUrl: string): { url: string; challenge: string; origin: string } | null {
@@ -1156,7 +1156,7 @@ function ensureDataDir(dataDir: string): void {
     const { root } = path.parse(ancestor);
     while (ancestor !== root) {
         try {
-            if (fs.lstatSync(ancestor).isSymbolicLink()) throw new Error("A pasta privada da sessão Proton não pode conter links simbólicos.");
+            if (fs.lstatSync(ancestor).isSymbolicLink()) throw new Error("The private Proton data folder can't contain symbolic links.");
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
@@ -1164,27 +1164,27 @@ function ensureDataDir(dataDir: string): void {
     }
     try {
         const directoryInfo = fs.lstatSync(resolved);
-        if (directoryInfo.isSymbolicLink() || !directoryInfo.isDirectory()) throw new Error("A pasta privada da sessão Proton não é um diretório regular.");
+        if (directoryInfo.isSymbolicLink() || !directoryInfo.isDirectory()) throw new Error("The private Proton data folder isn't a regular directory.");
     } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
     }
     const directoryInfo = fs.lstatSync(resolved);
-    if (directoryInfo.isSymbolicLink() || !directoryInfo.isDirectory()) throw new Error("A pasta privada da sessão Proton não é um diretório regular.");
+    if (directoryInfo.isSymbolicLink() || !directoryInfo.isDirectory()) throw new Error("The private Proton data folder isn't a regular directory.");
     if (process.platform !== "win32") fs.chmodSync(resolved, 0o700);
 }
 
 export async function checkProtonSession(dataDir: string, username: string): Promise<ProtonSessionCheckResult> {
     const requestedUsername = normalizeProtonUsername(username);
-    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { valid: false, error: "Usuário Proton não especificado." };
+    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { valid: false, error: "No Proton username given." };
     try {
         ensureDataDir(dataDir);
     } catch {
-        return { valid: false, code: "SESSION_PERSISTENCE", error: "Não foi possível acessar o armazenamento local da sessão Proton." };
+        return { valid: false, code: "SESSION_PERSISTENCE", error: "Couldn't reach the local Proton session storage." };
     }
     const availability = protonSessionAvailability(dataDir);
     if (availability === "none") {
-        return { valid: false, code: "INVALID_SESSION", error: "Sessão Proton não encontrada." };
+        return { valid: false, code: "INVALID_SESSION", error: "No saved Proton sign-in." };
     }
     if (availability === "unreadable") {
         // O arquivo existe, mas o armazenamento seguro desta execução não abre o
@@ -1219,15 +1219,15 @@ export function normalizeProtonPlan(value: unknown): ProtonPlanResult {
 
 export async function getProtonPlan(dataDir: string, username: string, log?: RunConfgenOptions["log"]): Promise<ProtonPlanResult> {
     const requestedUsername = normalizeProtonUsername(username);
-    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { success: false, status: "unknown", error: "Sessão Proton não encontrada." };
+    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { success: false, status: "unknown", error: "No saved Proton sign-in." };
     try {
         ensureDataDir(dataDir);
     } catch {
-        return { success: false, status: "unknown", error: "Não foi possível acessar o armazenamento local da sessão Proton." };
+        return { success: false, status: "unknown", error: "Couldn't reach the local Proton session storage." };
     }
     const availability = protonSessionAvailability(dataDir);
     if (availability === "none") {
-        return { success: false, status: "unknown", error: "Sessão Proton não encontrada." };
+        return { success: false, status: "unknown", error: "No saved Proton sign-in." };
     }
     if (availability === "unreadable") {
         return { success: false, status: "unknown", error: SAFE_STORAGE_UNAVAILABLE_MESSAGE };
@@ -1256,8 +1256,8 @@ export async function loginProton(
     log?: RunConfgenOptions["log"],
 ): Promise<ProtonLoginResult> {
     const requestedUsername = normalizeProtonUsername(username);
-    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { success: false, code: "CONFIGURATION_ERROR", message: "Informe o usuário Proton.", retryable: false };
-    if (typeof password !== "string" || password.length === 0) return { success: false, code: "CONFIGURATION_ERROR", message: "Informe a senha Proton.", retryable: false };
+    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { success: false, code: "CONFIGURATION_ERROR", message: "Enter the Proton username.", retryable: false };
+    if (typeof password !== "string" || password.length === 0) return { success: false, code: "CONFIGURATION_ERROR", message: "Enter the Proton password.", retryable: false };
     const key = dataDirKey(dataDir);
     const generation = protonLoginGenerations.get(key) ?? 0;
     return withProtonLoginLock(dataDir, async () => {
@@ -1265,7 +1265,7 @@ export async function loginProton(
         try {
             ensureDataDir(dataDir);
         } catch {
-            return { success: false, code: "SESSION_PERSISTENCE", message: "Não foi possível acessar o armazenamento local da sessão Proton.", error: "Não foi possível acessar o armazenamento local da sessão Proton.", retryable: true };
+            return { success: false, code: "SESSION_PERSISTENCE", message: "Couldn't reach the local Proton session storage.", error: "Couldn't reach the local Proton session storage.", retryable: true };
         }
         const controller = new AbortController();
         activeProtonLogins.set(key, controller);
@@ -1297,7 +1297,7 @@ export async function loginProton(
                 const returnedUsername = typeof result.json.username === "string" ? normalizeProtonUsername(result.json.username) : "";
                 if (!returnedUsername || returnedUsername.length > MAX_PROTON_USERNAME_LENGTH || !usernamesMatch(requestedUsername, returnedUsername)) return { success: false, code: "UNKNOWN", message: ACCOUNT_MISMATCH_ERROR, error: ACCOUNT_MISMATCH_ERROR, retryable: false };
                 if (!isUsableSessionFile(stagedSessionFile)) {
-                    return { success: false, code: "SESSION_PERSISTENCE", message: "A autenticação terminou, mas a sessão Proton não pôde ser preparada.", error: "A autenticação terminou, mas a sessão Proton não pôde ser preparada.", retryable: true };
+                    return { success: false, code: "SESSION_PERSISTENCE", message: "Sign-in finished, but the Proton session couldn't be prepared.", error: "Sign-in finished, but the Proton session couldn't be prepared.", retryable: true };
                 }
                 const stagedPlainText = fs.readFileSync(stagedSessionFile, "utf8");
                 const persisted = persistProtonSession(dataDir, stagedSessionFile, stagedPlainText);
@@ -1306,8 +1306,8 @@ export async function loginProton(
                     username: returnedUsername,
                     persisted,
                     message: persisted
-                        ? "Autenticação Proton concluída."
-                        : "Autenticação Proton concluída; esta máquina não guarda a sessão, então ela vale só nesta execução do Discord.",
+                        ? "Proton sign-in finished."
+                        : "Proton sign-in finished. This computer can't save the session, so it only lasts until Discord closes.",
                 };
             }
             const detail = [result.json?.code, result.json?.error, result.stderr, result.stdout].filter(value => typeof value === "string" && value.length > 0).join(" ");
@@ -1339,21 +1339,22 @@ export async function generateOptimalProtonConfig(
         freeOnly?: boolean;
         autoPing?: boolean;
         speedTest?: boolean;
+        excludeServers?: string[];
         signal?: AbortSignal;
         onProgress?: (progress: ProtonOptimizationProgress) => void;
         log?: RunConfgenOptions["log"];
     },
 ): Promise<ProtonOptimizationResult> {
     const requestedUsername = normalizeProtonUsername(options.username);
-    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { success: false, error: "Sessão Proton não encontrada." };
+    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { success: false, error: "No saved Proton sign-in." };
     try {
         ensureDataDir(dataDir);
     } catch {
-        return { success: false, error: "Não foi possível acessar o armazenamento local da sessão Proton." };
+        return { success: false, error: "Couldn't reach the local Proton session storage." };
     }
     const availability = protonSessionAvailability(dataDir);
     if (availability === "none") {
-        return { success: false, error: "Sessão Proton não encontrada." };
+        return { success: false, error: "No saved Proton sign-in." };
     }
     if (availability === "unreadable") {
         return { success: false, error: SAFE_STORAGE_UNAVAILABLE_MESSAGE };
@@ -1363,6 +1364,7 @@ export async function generateOptimalProtonConfig(
         const output = path.join(dataDir, "wireguard.conf");
         const staging = path.join(dataDir, `.wireguard.conf.${randomUUID()}.tmp`);
         const args = ["-username", requestedUsername, "-session-file", sessionFileToUse, "-output", staging, "-json", "-ipv6", "-exclude-countries", "BR"];
+        if (options.excludeServers?.length) args.push("-exclude-servers", options.excludeServers.join(","));
         if (options.autoPing !== false) args.push("-auto-ping");
         if (options.speedTest) {
             // A prova HTTPS do Discord é diagnóstica: não pode reprovar uma rota que já formou o túnel e mediu tráfego.
@@ -1408,7 +1410,7 @@ export async function generateOptimalProtonConfig(
                 };
             }
             const helperError = result.json && typeof result.json.error === "string" ? result.json.error : "";
-            let failure = safeDiagnosticDetail(helperError || result.stderr || "Falha ao gerar a configuração Proton.");
+            let failure = safeDiagnosticDetail(helperError || result.stderr || "Couldn't generate the Proton config.");
             if (options.speedTest && !options.signal?.aborted && probedServers.length > 0 &&
                 helperError.includes("nenhum candidato respondeu pelo túnel")) {
                 // O helper só devolve o erro agregado quando descarta as doze
@@ -1471,13 +1473,13 @@ async function diagnoseSpeedPreflightFailure(options: SpeedPreflightDiagnosisOpt
         const result = await runConfgen({ args, timeoutMs: 45_000, runtimeDirectory: options.dataDir, signal: options.signal, log: options.log });
         const json = result.json;
         if (result.code === 0 && json?.success === true && json?.manual === true && json?.preflight === "success") {
-            return `sonda estendida (15 s) em ${options.server}: a rota respondeu pelo túnel — o limite de 6 s expirou nesta rede; escolha essa rota na seleção manual para aplicá-la.`;
+            return `extended probe (15 s) on ${options.server}: the route answered through the tunnel. The 6 s limit ran out on this network. Pick this route in manual selection to apply it.`;
         }
-        return `sonda estendida (15 s) em ${options.server}: ${safeDiagnosticDetail(json?.error || result.stderr || "sem detalhe do helper", 200)}`;
+        return `extended probe (15 s) on ${options.server}: ${safeDiagnosticDetail(json?.error || result.stderr || "no helper detail", 200)}`;
     } catch (error) {
         if (error instanceof Error && error.name === "AbortError") return null;
         options.log?.("warn", "sonda estendida da verificação rápida falhou", { erro: logError(error) });
-        return `sonda estendida (15 s) em ${options.server}: helper indisponível (${safeDiagnosticDetail(error, 120)})`;
+        return `extended probe (15 s) on ${options.server}: helper unavailable (${safeDiagnosticDetail(error, 120)})`;
     } finally {
         try { fs.rmSync(staging, { force: true }); } catch {}
     }
@@ -1543,10 +1545,10 @@ function resolveProtonSession(dataDir: string): { availability: ProtonSessionAva
     try {
         ensureDataDir(dataDir);
     } catch {
-        return { error: "Não foi possível acessar o armazenamento local da sessão Proton." };
+        return { error: "Couldn't reach the local Proton session storage." };
     }
     const availability = protonSessionAvailability(dataDir);
-    if (availability === "none") return { error: "Sessão Proton não encontrada." };
+    if (availability === "none") return { error: "No saved Proton sign-in." };
     if (availability === "unreadable") return { error: SAFE_STORAGE_UNAVAILABLE_MESSAGE };
     return { availability };
 }
@@ -1593,7 +1595,7 @@ export async function generateProtonRouteCatalog(
     options: ProtonRouteCatalogOptions,
 ): Promise<ProtonRouteCatalogResult> {
     const requestedUsername = normalizeProtonUsername(options.username);
-    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { success: false, error: "Sessão Proton não encontrada." };
+    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { success: false, error: "No saved Proton sign-in." };
     const session = resolveProtonSession(dataDir);
     if ("error" in session) return { success: false, error: session.error };
 
@@ -1607,7 +1609,7 @@ export async function generateProtonRouteCatalog(
             const result = await runConfgen({ args, timeoutMs: 60_000, signal: options.signal, runtimeDirectory: dataDir, onProgress: options.onProgress, log: options.log });
             const json = result.json;
             if (result.code !== 0 || json?.success !== true) {
-                return { success: false, error: safeDiagnosticDetail(json?.error || result.stderr || result.stdout || "Não foi possível carregar o catálogo de rotas ProtonVPN.") };
+                return { success: false, error: safeDiagnosticDetail(json?.error || result.stderr || result.stdout || "Couldn't load the ProtonVPN route catalog.") };
             }
             const routes = parseProtonRouteCatalog(json?.routes);
             if (routes === null) return { success: false, error: INVALID_CATALOG_ERROR };
@@ -1634,8 +1636,8 @@ export async function generateManualProtonConfig(
 ): Promise<ProtonManualRouteResult> {
     const requestedUsername = normalizeProtonUsername(options.username);
     const requestedServer = typeof options.server === "string" ? options.server.trim() : "";
-    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { success: false, error: "Sessão Proton não encontrada." };
-    if (!requestedServer || requestedServer.length > MAX_ROUTE_TEXT_LENGTH) return { success: false, error: "Nenhuma rota ProtonVPN foi selecionada." };
+    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { success: false, error: "No saved Proton sign-in." };
+    if (!requestedServer || requestedServer.length > MAX_ROUTE_TEXT_LENGTH) return { success: false, error: "No ProtonVPN route was selected." };
     const session = resolveProtonSession(dataDir);
     if ("error" in session) return { success: false, error: session.error };
 

@@ -328,39 +328,39 @@ export function interpretarResposta(status: number, retryAfter: number, corpoTex
 
     if (status === 201) {
         const issueUrl = textoCurto(corpo?.issue_url) ?? textoCurto(corpo?.html_url);
-        if (!issueUrl) return { ok: false, code: "API_INDISPONIVEL", error: "A API respondeu sem o endereco da issue." };
+        if (!issueUrl) return { ok: false, code: "API_INDISPONIVEL", error: "The API replied without the issue address." };
         const issueNumber = Number(corpo?.issue_number);
         return { ok: true, code: "OK", issueUrl, issueNumber: Number.isFinite(issueNumber) ? issueNumber : undefined };
     }
 
-    if (status === 400) return { ok: false, code: "INVALIDO", error: mensagemDoServidor(corpo, "A API recusou o relato.") };
-    if (status === 401) return { ok: false, code: "NAO_AUTORIZADO", error: "A API recusou o envio. Atualize o plugin." };
-    if (status === 413) return { ok: false, code: "LOG_GRANDE", error: "O relato ficou grande demais para enviar." };
+    if (status === 400) return { ok: false, code: "INVALIDO", error: mensagemDoServidor(corpo, "The API refused the report.") };
+    if (status === 401) return { ok: false, code: "NAO_AUTORIZADO", error: "The API refused the report. Update the plugin." };
+    if (status === 413) return { ok: false, code: "LOG_GRANDE", error: "The report is too large to send." };
     if (status === 429) {
         return {
             ok: false,
             code: "BLOQUEADO",
             blocked: true,
             retryAfter: retry ?? 0,
-            error: mensagemDoServidor(corpo, "Voce enviou relatos em excesso."),
+            error: mensagemDoServidor(corpo, "You sent too many reports."),
         };
     }
-    if (status === 502) return { ok: false, code: "GITHUB", error: "O GitHub recusou a criacao da issue. Tente mais tarde." };
+    if (status === 502) return { ok: false, code: "GITHUB", error: "GitHub refused to create the issue. Try again later." };
 
-    return { ok: false, code: "API_INDISPONIVEL", error: mensagemDoServidor(corpo, `A API respondeu ${status}.`) };
+    return { ok: false, code: "API_INDISPONIVEL", error: mensagemDoServidor(corpo, `The API replied ${status}.`) };
 }
 
 /** Sem resposta da API (offline, DNS, prazo): o texto digitado fica com o usuário. */
 export function resultadoDeRede(): BugReportResult {
-    return { ok: false, code: "REDE", error: "Sem resposta da API. Tente novamente." };
+    return { ok: false, code: "REDE", error: "No response from the API. Try again." };
 }
 
 export function resultadoTituloObrigatorio(): BugReportResult {
-    return { ok: false, code: "TITULO_OBRIGATORIO", error: "Informe um resumo curto do problema." };
+    return { ok: false, code: "TITULO_OBRIGATORIO", error: "Enter a short summary of the problem." };
 }
 
 export function resultadoSegredoRemanescente(): BugReportResult {
-    return { ok: false, code: "SEGREDO_REMANESCENTE", error: "Nao enviei o relato por seguranca. Copie o diagnostico e revise antes de enviar." };
+    return { ok: false, code: "SEGREDO_REMANESCENTE", error: "The report wasn't sent, for safety. Copy the diagnostics and review them before sending." };
 }
 
 export function resultadoDeduplicado(issueUrl: string): BugReportResult {

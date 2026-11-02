@@ -19,6 +19,7 @@ import { findStoreLazy } from "@webpack";
 import { closeModal as closeDiscordModal, Constants, MaskedLink, Modal, openModal, React, RestAPI, SearchableSelect, showToast as showDiscordToast, TextArea, TextInput, useEffect, UserStore, useState } from "@webpack/common";
 
 import { ControlPanel, type ControlPanelController, PANEL_TONE_LABEL, panelIconFor, PanelIconOff, type PanelTone,panelTone } from "./control-panel";
+import type { GoLiveStatus } from "./go-live";
 import {
     formatProtonRoutePing,
     isProtonRouteSelectable,
@@ -222,7 +223,7 @@ function readPluginUpdateStatus(): Promise<PluginUpdateStatus> | null {
     const flight = withTimeout(
         () => getStatus(),
         PLUGIN_UPDATE_STATUS_TIMEOUT_MS,
-        "A consulta do estado do updater excedeu o tempo limite.",
+        "The updater status check timed out.",
     );
     pluginUpdateStatusFlight = flight;
     void flight.finally(() => {
@@ -288,7 +289,7 @@ function PluginUpdateToast({ currentVersion, availableVersion, channel, lifecycl
             <Paragraph>The update was downloaded, verified and prepared. Discord won't restart on its own.</Paragraph>
             <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end", flexWrap: "wrap" }}>
                 <Button onClick={() => { dismiss(); dismissPluginUpdateToast(availableVersion); }}>Later</Button>
-                <Button onClick={() => { dismiss(); reloadForPreparedPluginUpdate(); }}>Recarregar Discord</Button>
+                <Button onClick={() => { dismiss(); reloadForPreparedPluginUpdate(); }}>Reload Discord</Button>
             </div>
         </div>
     );
@@ -504,7 +505,7 @@ function protonSessionStatusTitle(code: ProtonSessionCheck["code"]): string {
         case "TIMEOUT":
             return "No network to check the session";
         case "MISSING_EXECUTABLE":
-            return "Componente ProtonVPN ausente";
+            return "ProtonVPN component missing";
         case "SESSION_PERSISTENCE":
             return "Session storage unavailable";
         case "INVALID_SESSION":
@@ -628,6 +629,17 @@ const protonRouteBadgeStyle = {
  * sobrevive a remount) e aplica a rota escolhida somente com o identificador da
  * medição e o nome exato do servidor.
  */
+const PANEL_CACHE_MS = 10 * 60_000;
+
+function isRecentRouteMeasurement(snapshot: PluginRouteDiscoverySnapshot) {
+    return snapshot.active !== true
+        && snapshot.contextMatches !== false
+        && !snapshot.error
+        && Array.isArray(snapshot.routes) && snapshot.routes.length > 0
+        && typeof snapshot.updatedAt === "number"
+        && Date.now() - snapshot.updatedAt < PANEL_CACHE_MS;
+}
+
 function useProtonRouteSelection({ active, account, country, freeOnly, autoPing }: {
     active: boolean;
     account: string;
@@ -742,6 +754,8 @@ function useProtonRouteSelection({ active, account, country, freeOnly, autoPing 
                 return;
             }
             if (snapshot) applySnapshot(snapshot);
+            // Abrir o painel não mede tudo de novo: "Find routes" e "Try again" mudam `revision`.
+            if (revision === 0 && snapshot && isRecentRouteMeasurement(snapshot)) return;
             if (snapshot?.active && snapshot.contextMatches === false && typeof Native.cancelProtonRouteDiscovery === "function") {
                 await Native.cancelProtonRouteDiscovery(snapshot.requestId ?? undefined);
                 if (disposed) return;
@@ -894,10 +908,10 @@ function ProtonRouteSelection({
     const progressIsIndeterminate = optimization.active && progressPercent === null;
     const activeRouteSummary = formatVpnRouteSummary(activeRoute ?? null);
     const heading = ordered.length > 0
-        ? `Escolha uma rota Proton — ${measuredCount} de ${ordered.length} rotas com ping`
-        : "Escolha uma rota Proton";
+        ? `Choose a Proton route: ${measuredCount} of ${ordered.length} routes with ping`
+        : "Choose a Proton route";
     const routeList = (
-        <ul aria-label="Rotas Proton disponíveis" tabIndex={0} style={protonRouteListStyle}>
+        <ul aria-label="Available Proton routes" tabIndex={0} style={protonRouteListStyle}>
             {ordered.map(candidate => {
                 const selectable = isProtonRouteSelectable(candidate);
                 const stateLabel = protonRouteStateLabel(candidate, { discoveryActive: discovery.active });
@@ -909,21 +923,21 @@ function ProtonRouteSelection({
                         <div style={protonRouteRowTopStyle}>
                             <span>
                                 <strong>{candidate.server}</strong>
-                                {candidate.server === recommendedServer && <span style={protonRouteBadgeStyle}>Recomendada</span>}
+                                {candidate.server === recommendedServer && <span style={protonRouteBadgeStyle}>Recommended</span>}
                             </span>
                             <span>{formatProtonRoutePing(candidate.pingMs)}</span>
                         </div>
                         {location && <span style={protonRouteMetaStyle}>{location}</span>}
                         {tier && <span style={protonRouteMetaStyle}>{tier}</span>}
                         <div style={protonRouteRowTopStyle}>
-                            <span style={protonRouteMetaStyle}>{applying ? `Aplicando rota ${candidate.server}…` : stateLabel}</span>
+                            <span style={protonRouteMetaStyle}>{applying ? `Applying route ${candidate.server}…` : stateLabel}</span>
                             <Button
                                 onClick={() => applying ? onCancelSelection() : onSelect(candidate.server)}
                                 disabled={applying ? false : (!selectable || exclusive || Boolean(lockedReason))}
-                                aria-label={applying ? `Cancelar aplicação da rota ${candidate.server}` : `Selecionar rota ${candidate.server}`}
-                                title={applying ? "Cancelar aplicação" : (selectable ? undefined : (stateLabel || "Rota indisponível"))}
+                                aria-label={applying ? `Cancel applying route ${candidate.server}` : `Select route ${candidate.server}`}
+                                title={applying ? "Cancel applying" : (selectable ? undefined : (stateLabel || "Route unavailable"))}
                             >
-                                {applying ? "Cancelar" : "Selecionar rota"}
+                                {applying ? "Cancel" : "Select route"}
                             </Button>
                         </div>
                     </li>
@@ -933,45 +947,45 @@ function ProtonRouteSelection({
     );
 
     return (
-        <section aria-label="Seleção manual de rota Proton" style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+        <section aria-label="Manual Proton route selection" style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
             <div>
                 <Button onClick={onOptimize} disabled={exclusive || Boolean(lockedReason)}>
-                    {optimization.active ? "Otimizando automaticamente…" : "Otimizar automaticamente"}
+                    {optimization.active ? "Optimizing automatically…" : "Optimize automatically"}
                 </Button>
             </div>
             <div style={onboardingBoxStyle} role="status" aria-live="polite" aria-busy={optimization.active}>
                 <div style={protonRouteRowTopStyle}>
-                    <strong>Estado da rota</strong>
+                    <strong>Route state</strong>
                     <span>{optimization.label}</span>
                 </div>
                 {(progressPercent !== null || progressIsIndeterminate) && (
                     <progress
                         {...(progressPercent === null ? {} : { value: progressPercent })}
                         max={100}
-                        aria-label="Progresso da otimização automática"
-                        aria-valuetext={progressPercent === null ? "Otimização em andamento; total ainda não conhecido" : `${progressPercent}%`}
+                        aria-label="Automatic optimization progress"
+                        aria-valuetext={progressPercent === null ? "Optimization running; total not known yet" : `${progressPercent}%`}
                         style={{ width: "100%", marginTop: "12px" }}
                     />
                 )}
-                {progress && progress.total > 0 && <Paragraph>{progress.tested} de {progress.total} servidores testados · {progress.succeeded} aprovados</Paragraph>}
-                {progress?.server && <Paragraph>Servidor selecionado: {progress.server}</Paragraph>}
-                {typeof progress?.pingMs === "number" && <Paragraph>Latência medida: {progress.pingMs} ms</Paragraph>}
+                {progress && progress.total > 0 && <Paragraph>{progress.tested} of {progress.total} servers tested · {progress.succeeded} passed</Paragraph>}
+                {progress?.server && <Paragraph>Selected server: {progress.server}</Paragraph>}
+                {typeof progress?.pingMs === "number" && <Paragraph>Measured latency: {progress.pingMs} ms</Paragraph>}
                 {activeRouteSummary && (
                     <div style={protonRouteRowTopStyle}>
-                        <span>{routeActive ? "Rota em uso agora" : "Rota preparada no perfil"}</span>
+                        <span>{routeActive ? "Route in use now" : "Route ready in the profile"}</span>
                         <strong>{activeRouteSummary}</strong>
                     </div>
                 )}
             </div>
             {optimization.error && (
                 <Paragraph role="alert" aria-live="assertive">
-                    <strong>{optimization.error}</strong> A seleção manual continua disponível na lista abaixo, ordenada por ping.
+                    <strong>{optimization.error}</strong> Manual selection is still available in the list below, sorted by ping.
                 </Paragraph>
             )}
             <Paragraph><strong>{heading}</strong></Paragraph>
             {discovery.active && (
                 <Paragraph role="status" aria-live="polite">
-                    Catálogo Proton em atualização: as rotas já medidas aparecem na lista e voltam a aceitar seleção quando a medição terminar.
+                    Proton catalog updating: routes already measured show in the list and can be selected again when measuring ends.
                 </Paragraph>
             )}
             {lockedReason ? (
@@ -988,7 +1002,7 @@ function ProtonRouteSelection({
                     {discovery.error && (
                         <Paragraph role="alert" aria-live="assertive">
                             <strong>{discovery.error}</strong>{" "}
-                            <Button onClick={onDiscover} disabled={exclusive}>Buscar rotas novamente</Button>
+                            <Button onClick={onDiscover} disabled={exclusive}>Find routes again</Button>
                         </Paragraph>
                     )}
                     {ordered.length === 0 ? (
@@ -997,7 +1011,7 @@ function ProtonRouteSelection({
                         discovery.active ? null : (
                             <Paragraph role="status" aria-live="polite">
                                 {routeActive && activeRouteSummary
-                                    ? <>O túnel está ativo com <strong>{activeRouteSummary}</strong>. A lista desta sessão ainda não foi carregada — use "Buscar rotas novamente" ou "Otimizar automaticamente" para medir outras rotas.</>
+                                    ? <>The tunnel is on with <strong>{activeRouteSummary}</strong>. The list for this session hasn't loaded yet. Use "Find routes again" or "Optimize automatically" to measure other routes.</>
                                     : emptyMessage}
                             </Paragraph>
                         )
@@ -1012,10 +1026,10 @@ function ProtonRouteSelection({
 function OnboardingSteps({ page, customMode }: { page: OnboardingPage; customMode: boolean }) {
     const active = page === "account" ? 0 : page === "route" ? 1 : 2;
     const labels = customMode
-        ? ["1  Configuração WireGuard", "2  Rota real", "3  Pronto"]
-        : ["1  Conta Proton", "2  Rota real", "3  Pronto"];
+        ? ["1  WireGuard config", "2  Real route", "3  Done"]
+        : ["1  Proton account", "2  Real route", "3  Done"];
     return (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px" }} aria-label="Etapas da configuração" role="list">
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px" }} aria-label="Setup steps" role="list">
             {labels.map((label, index) => (
                 <div
                     key={label}
@@ -1109,7 +1123,7 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
         setTwoFactorCode("");
         if (!disposedRef.current) {
             setLoginCancelRequested(true);
-            setError("Cancelando o login Proton…");
+            setError("Cancelling Proton sign-in…");
         }
         void Promise.resolve(Native.cancelProtonLogin(activeRequestId)).catch(error => recordRendererError("Falha ao cancelar login Proton", error));
     };
@@ -1166,11 +1180,15 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
         settings.store.onboardingSkipped = false;
         closeModal();
         if (typeof Native?.enable !== "function") return;
-        // Concluir a configuração precisa deixar o Discord já roteado: o túnel
-        // sobe aqui e o cliente reinicia para a rota valer sem um passo manual
-        // no painel. "Voltar" continua disponível para quem quiser reconfigurar.
-        void Promise.resolve(Native.enable()).then(result => {
-            if (result && result.success === false) {
+        // Concluir a configuração precisa deixar o Discord já roteado, sem um passo manual no
+        // painel. "Voltar" continua disponível para quem quiser reconfigurar.
+        const activate = async (): Promise<{ success: boolean; error?: string; message?: string; }> => {
+            const goLive = await turnOnGoLive();
+            if (goLive === null) return Native!.enable();
+            return { success: goLive.state === "active", error: goLive.error ?? undefined };
+        };
+        void activate().then(result => {
+            if (result.success === false) {
                 showToast(
                     `GoLiveBypass couldn't turn on the VPN: ${result.error || result.message || "see the log"}`,
                     "failure"
@@ -1183,7 +1201,7 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
 
     const checkSession = async (value: string) => {
         if (!Native || !value.trim()) {
-            if (!disposedRef.current) setSession({ valid: false, code: "INVALID_SESSION", error: "Informe o usuário Proton." });
+            if (!disposedRef.current) setSession({ valid: false, code: "INVALID_SESSION", error: "Enter the Proton username." });
             return null;
         }
         const revision = accountRevisionRef.current;
@@ -1202,7 +1220,7 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
             const result: ProtonSessionCheck = {
                 valid: false,
                 code: "NETWORK_ERROR",
-                error: "Não foi possível verificar a sessão Proton por causa da rede.",
+                error: "Couldn't check the Proton session because of the network.",
             };
             setSession(result);
             return result;
@@ -1249,7 +1267,7 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
             } catch (loadError) {
                 if (!disposed && !disposedRef.current && loadRevision === accountRevisionRef.current) {
                     setSessionLoading(false);
-                    setError(loadError instanceof Error ? loadError.message : "Não foi possível ler a sessão Proton.");
+                    setError(loadError instanceof Error ? loadError.message : "Couldn't read the Proton session.");
                 }
             }
         };
@@ -1357,8 +1375,8 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                         ? (session.error || protonSessionStatusTitle(session.code))
                         : null;
                     setError(detail
-                        ? `${detail} Informe a senha para entrar novamente.`
-                        : "Informe a senha para iniciar uma nova sessão ou renovar a sessão atual.");
+                        ? `${detail} Enter your password to sign in again.`
+                        : "Enter your password to start a new session or renew this one.");
                     return;
                 }
                 const loginRequestId = `plugin-onboarding-login-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -1382,9 +1400,9 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                 if (!checked) return;
                 if (!checked.valid) {
                     if (checked.code === "NETWORK_ERROR" || checked.code === "TIMEOUT") {
-                        setError("Login concluído, mas a validação da sessão está temporariamente indisponível pela rede. Tente novamente antes de otimizar.");
+                        setError("Signed in, but session validation is unavailable right now because of the network. Try again before optimizing.");
                     } else {
-                        setError(checked.error || "A sessão salva não passou na validação.");
+                        setError(checked.error || "The saved session didn't pass validation.");
                     }
                     return;
                 }
@@ -1396,7 +1414,7 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
             enterRoute();
         } catch (continueError) {
             if (!disposedRef.current && revision === accountRevisionRef.current) {
-                setError(continueError instanceof Error ? continueError.message : "Não foi possível concluir a etapa da conta Proton.");
+                setError(continueError instanceof Error ? continueError.message : "Couldn't finish the Proton account step.");
             }
         } finally {
             loginRequestIdRef.current = null;
@@ -1430,10 +1448,10 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                 const result = await withTimeout(
                     () => Native.testWireGuardConfig(customConfigPath) as Promise<{ success?: boolean; error?: string }>,
                     CUSTOM_WIREGUARD_VALIDATION_TIMEOUT_MS,
-                    "A validação da configuração WireGuard excedeu o tempo limite. Cancele e tente novamente.",
+                    "WireGuard config validation timed out. Cancel and try again.",
                 );
                 if (!isOptimizationCurrent()) return;
-                if (result.success !== true) throw new Error(result.error || "A configuração WireGuard personalizada não passou na validação.");
+                if (result.success !== true) throw new Error(result.error || "The custom WireGuard config didn't pass validation.");
                 setOptimization({
                     active: false,
                     requestId: nextRequestId,
@@ -1465,7 +1483,7 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                     error: result.error,
                     updatedAt: Date.now(),
                 });
-                setError("Otimização cancelada. Você pode tentar novamente.");
+                setError("Optimization cancelled. You can try again.");
                 return;
             }
             if (!result.success) throw new Error(result.error || "Couldn't optimize the Proton route.");
@@ -1486,7 +1504,7 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
             setPage("ready");
         } catch (optimizeError) {
             if (isOptimizationCurrent()) {
-                const detail = optimizeError instanceof Error ? optimizeError.message : "A otimização Proton falhou.";
+                const detail = optimizeError instanceof Error ? optimizeError.message : "The Proton optimization failed.";
                 setOptimization(current => ({
                     active: false,
                     requestId: nextRequestId,
@@ -1522,10 +1540,10 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
             ...current,
             active: false,
             phase: "cancelled",
-            error: customMode ? "Validação cancelada." : "Otimização cancelada.",
+            error: customMode ? "Validation cancelled." : "Optimization cancelled.",
             updatedAt: Date.now(),
         } : null);
-        setError(customMode ? "Validação cancelada. Você pode tentar novamente." : "Otimização cancelada. Você pode tentar novamente.");
+        setError(customMode ? "Validation cancelled. You can try again." : "Optimization cancelled. You can try again.");
         setBusy(false);
     };
 
@@ -1535,58 +1553,58 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
         : null;
     const progressIsIndeterminate = progress?.active === true && progressPercent === null;
     const phaseLabel = customMode
-        ? progress?.phase === "preparing" ? "validando configuração"
-            : progress?.phase === "completed" ? "configuração validada"
-            : progress?.phase === "failed" ? "validação falhou"
-                : progress?.phase === "cancelled" ? "validação cancelada"
-                    : "pronto para validar"
-        : progress?.phase === "ping" ? "medindo latência"
-            : progress?.phase === "testing" ? "testando servidores"
-                : progress?.phase === "finalizing" ? "finalizando a configuração"
-                    : progress?.phase === "completed" ? "rota preparada"
-                        : progress?.phase === "failed" ? "otimização falhou"
-                            : progress?.phase === "cancelled" ? "otimização cancelada"
-                                : "preparando a seleção";
+        ? progress?.phase === "preparing" ? "validating config"
+            : progress?.phase === "completed" ? "config validated"
+            : progress?.phase === "failed" ? "validation failed"
+                : progress?.phase === "cancelled" ? "validation cancelled"
+                    : "ready to validate"
+        : progress?.phase === "ping" ? "measuring latency"
+            : progress?.phase === "testing" ? "testing servers"
+                : progress?.phase === "finalizing" ? "finishing the config"
+                    : progress?.phase === "completed" ? "route ready"
+                        : progress?.phase === "failed" ? "optimization failed"
+                            : progress?.phase === "cancelled" ? "optimization cancelled"
+                                : "preparing the selection";
 
     const routeReady = progress?.phase === "completed" || manualRouteServer !== null;
     const routeFailure = !busy && (progress?.phase === "failed" || progress?.phase === "cancelled") ? error : null;
 
     const actions = page === "account" ? [
-        { text: busy ? (customMode ? "Validando…" : "Entrando…") : customMode ? "Continuar para rota real" : "Continuar para rota real", variant: "primary" as const, onClick: () => void continueToRoute(), disabled: busy || sessionLoading || (!customMode && !username.trim()) },
-        ...(busy && !customMode ? [{ text: loginCancelRequested ? "Cancelando…" : "Cancelar login", variant: "danger" as const, onClick: cancelActiveLogin, disabled: loginCancelRequested }] : []),
+        { text: busy ? (customMode ? "Validating…" : "Signing in…") : customMode ? "Continue to the real route" : "Continue to the real route", variant: "primary" as const, onClick: () => void continueToRoute(), disabled: busy || sessionLoading || (!customMode && !username.trim()) },
+        ...(busy && !customMode ? [{ text: loginCancelRequested ? "Cancelling…" : "Cancel sign-in", variant: "danger" as const, onClick: cancelActiveLogin, disabled: loginCancelRequested }] : []),
         // Adiar é fechar e gravar o skip (closeModal); não conclui o onboarding
         // nem libera ativação automática — só destrava o painel para configurar depois.
-        { text: "Configurar depois", variant: "secondary" as const, onClick: closeModal },
+        { text: "Set up later", variant: "secondary" as const, onClick: closeModal },
     ] : page === "route" ? (customMode ? [
-        { text: "Voltar", variant: "secondary" as const, onClick: () => { if (!busy) setPage("account"); }, disabled: busy },
+        { text: "Back", variant: "secondary" as const, onClick: () => { if (!busy) setPage("account"); }, disabled: busy },
         busy
-            ? { text: "Cancelar validação", variant: "danger" as const, onClick: cancelOptimization }
-            : { text: progress?.phase === "completed" ? "Continuar" : "Validar rota real", variant: "primary" as const, onClick: progress?.phase === "completed" ? () => setPage("ready") : () => void optimizeRoute() },
+            ? { text: "Cancel validation", variant: "danger" as const, onClick: cancelOptimization }
+            : { text: progress?.phase === "completed" ? "Continue" : "Validate the real route", variant: "primary" as const, onClick: progress?.phase === "completed" ? () => setPage("ready") : () => void optimizeRoute() },
     ] : [
         // A ação automática vive na seção compartilhada, acima da lista. O
         // rodapé só progride depois de uma otimização concluída ou de uma rota
         // manual realmente aplicada — nunca com um perfil de outra conta.
-        { text: "Voltar", variant: "secondary" as const, onClick: () => { if (!busy && !routeSelection.applyingServer) setPage("account"); }, disabled: busy || Boolean(routeSelection.applyingServer) },
+        { text: "Back", variant: "secondary" as const, onClick: () => { if (!busy && !routeSelection.applyingServer) setPage("account"); }, disabled: busy || Boolean(routeSelection.applyingServer) },
         busy
-            ? { text: "Cancelar otimização", variant: "danger" as const, onClick: cancelOptimization }
-            : { text: "Continuar", variant: "primary" as const, onClick: () => setPage("ready"), disabled: !routeReady },
+            ? { text: "Cancel optimization", variant: "danger" as const, onClick: cancelOptimization }
+            : { text: "Continue", variant: "primary" as const, onClick: () => setPage("ready"), disabled: !routeReady },
     ]) : [
-        { text: "Ativar VPN e reiniciar o Discord", variant: "primary" as const, onClick: complete },
+        { text: "Turn on VPN and restart Discord", variant: "primary" as const, onClick: complete },
     ];
     const pageHeading = page === "account"
-        ? customMode ? "1. Configure sua rota WireGuard" : "1. Conecte sua conta ProtonVPN"
+        ? customMode ? "1. Set up your WireGuard route" : "1. Connect your ProtonVPN account"
         : page === "route"
-            ? customMode ? "2. Valide sua rota WireGuard real" : "2. Prepare e teste sua rota real"
-            : customMode ? "3. Configuração concluída e validada" : "3. Rota real preparada e pronta";
+            ? customMode ? "2. Validate your real WireGuard route" : "2. Prepare and test your real route"
+            : customMode ? "3. Setup finished and validated" : "3. Real route prepared and ready";
 
     if (!Native) {
-        return <Modal {...modalProps} onClose={closeModal} title="Configuração do GoLiveBypass" size="md" actions={[{ text: "Fechar", variant: "secondary", onClick: closeModal }]}>
-            <Paragraph>A parte nativa do plugin não está disponível nesta instalação. O transporte WireGuard exige a ponte desktop nos clientes homologados (Windows x64 e Linux x64).</Paragraph>
+        return <Modal {...modalProps} onClose={closeModal} title="GoLiveBypass setup" size="md" actions={[{ text: "Close", variant: "secondary", onClick: closeModal }]}>
+            <Paragraph>The plugin's native part isn't available in this install. The WireGuard transport needs the desktop bridge on supported clients (Windows x64 and Linux x64).</Paragraph>
         </Modal>;
     }
 
     return (
-        <Modal {...modalProps} onClose={closeModal} title="Configurar o GoLiveBypass" size="md" actions={actions}>
+        <Modal {...modalProps} onClose={closeModal} title="Set up GoLiveBypass" size="md" actions={actions}>
             <div style={{ maxHeight: "min(60vh, 560px)", overflowY: "auto", overflowX: "hidden", paddingRight: "4px", minWidth: 0 }}>
                 <OnboardingSteps page={page} customMode={customMode} />
                 <h2 ref={pageHeadingRef} tabIndex={-1} style={{ margin: "0 0 12px", color: "var(--header-primary)" }}>{pageHeading}</h2>
@@ -1594,44 +1612,44 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                     {customMode ? (
                         <>
-                            <Paragraph>O modo personalizado não usa conta Proton nem solicita credenciais. Na etapa seguinte, o plugin validará a rota WireGuard real configurada antes de concluir.</Paragraph>
+                            <Paragraph>Custom mode doesn't use a Proton account or ask for credentials. In the next step, the plugin validates the real WireGuard route you set up before finishing.</Paragraph>
                             {vpnStatus?.platform === "unsupported" && (
                                 <Paragraph role="alert" aria-live="polite">
-                                    <strong>Plataforma não suportada:</strong> {vpnStatus.externalReason || "O transporte WireGuard exige Windows x64 ou Linux x64."}
+                                    <strong>Platform not supported:</strong> {vpnStatus.externalReason || "The WireGuard transport requires Windows x64 or Linux x64."}
                                 </Paragraph>
                             )}
                             {Boolean(vpnStatus?.dependencies && vpnStatus.dependencies.length > 0) && (
                                 <Paragraph role="alert" aria-live="polite">
-                                    <strong>Dependências do sistema:</strong> Pacotes ausentes ({vpnStatus!.dependencies!.join(", ")}). Você pode validar o arquivo agora, mas a ativação exigirá a instalação dos pacotes necessários.
+                                    <strong>System dependencies:</strong> Missing packages ({vpnStatus!.dependencies!.join(", ")}). You can validate the file now, but turning on will require installing them.
                                 </Paragraph>
                             )}
                             <Button onClick={() => void selectCustomConfig()} disabled={busy || sessionLoading}>
-                                {customConfigPath.trim() ? "Trocar arquivo .conf" : "Selecionar arquivo .conf"}
+                                {customConfigPath.trim() ? "Change .conf file" : "Select .conf file"}
                             </Button>
                             <div style={onboardingBoxStyle} role="status" aria-live="polite" aria-busy={busy}>
-                                <Paragraph>{customConfigPath.trim() ? "Arquivo WireGuard importado para a pasta privada do plugin." : "Nenhum arquivo WireGuard personalizado foi configurado ainda."}</Paragraph>
+                                <Paragraph>{customConfigPath.trim() ? "WireGuard file imported to the plugin's private folder." : "No custom WireGuard file has been set up yet."}</Paragraph>
                             </div>
                             <Button onClick={() => switchVpnMode("proton")} disabled={busy}>
-                                Usar a VPN Proton do plugin
+                                Use the plugin's Proton VPN
                             </Button>
                             {error && <Paragraph role="alert" aria-live="assertive"><strong>{error}</strong></Paragraph>}
                         </>
                     ) : (
                         <>
-                            <Paragraph>A sessão é validada e fica somente no armazenamento protegido do plugin. Senhas e códigos nunca são exibidos no diagnóstico.</Paragraph>
+                            <Paragraph>The session is validated and stays only in the plugin's protected storage. Passwords and codes never appear in diagnostics.</Paragraph>
                             {vpnStatus?.sessionStorage === "memory-only" && (
                                 <Paragraph role="note" aria-live="polite">
-                                    <strong>Esta máquina não guarda a sessão:</strong> o armazenamento seguro do sistema (Secret Service/libsecret) não está disponível. Você entra normalmente, mas a sessão vale só enquanto o Discord estiver aberto e o login será pedido de novo depois de reiniciá-lo — nada é gravado em texto claro no disco.
+                                    <strong>This computer can't save the session:</strong> the system's secure storage (Secret Service/libsecret) isn't available. You sign in as usual, but the session only lasts while Discord is open and you'll have to sign in again after restarting it. Nothing is written to disk in plain text.
                                 </Paragraph>
                             )}
                             {vpnStatus?.platform === "unsupported" && (
                                 <Paragraph role="alert" aria-live="polite">
-                                    <strong>Plataforma não suportada:</strong> {vpnStatus.externalReason || "O transporte WireGuard exige Windows x64 ou Linux x64."}
+                                    <strong>Platform not supported:</strong> {vpnStatus.externalReason || "The WireGuard transport requires Windows x64 or Linux x64."}
                                 </Paragraph>
                             )}
                             {Boolean(vpnStatus?.dependencies && vpnStatus.dependencies.length > 0) && (
                                 <Paragraph role="alert" aria-live="polite">
-                                    <strong>Dependências do sistema:</strong> Pacotes ausentes ({vpnStatus!.dependencies!.join(", ")}). Você pode preparar a rota agora, mas a ativação exigirá a instalação dos pacotes necessários.
+                                    <strong>System dependencies:</strong> Missing packages ({vpnStatus!.dependencies!.join(", ")}). You can prepare the route now, but turning on will require installing them.
                                 </Paragraph>
                             )}
                             <TextInput value={username} onChange={value => {
@@ -1651,34 +1669,34 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                                     setError(null);
                                 }
                                 setUsername(value);
-                            }} placeholder="Usuário ProtonVPN" aria-label="Usuário ProtonVPN" disabled={busy} />
-                            <TextInput inputRef={passwordRef} value={password} onChange={setPassword} placeholder="Senha ProtonVPN" aria-label="Senha ProtonVPN" type="password" disabled={busy} />
-                            <TextInput value={twoFactorCode} onChange={setTwoFactorCode} placeholder="Código 2FA (se solicitado)" aria-label="Código 2FA (se solicitado)" disabled={busy} />
-                            {sessionLoading && <Paragraph>Verificando a sessão salva…</Paragraph>}
-                            {!sessionLoading && session?.valid && <Paragraph><strong>Sessão válida</strong>{session.expiresIn ? ` · expira ${session.expiresIn}` : ""}. Você pode continuar sem digitar a senha.</Paragraph>}
+                            }} placeholder="ProtonVPN username" aria-label="ProtonVPN username" disabled={busy} />
+                            <TextInput inputRef={passwordRef} value={password} onChange={setPassword} placeholder="ProtonVPN password" aria-label="ProtonVPN password" type="password" disabled={busy} />
+                            <TextInput value={twoFactorCode} onChange={setTwoFactorCode} placeholder="2FA code (if asked)" aria-label="2FA code (if asked)" disabled={busy} />
+                            {sessionLoading && <Paragraph>Checking the saved session…</Paragraph>}
+                            {!sessionLoading && session?.valid && <Paragraph><strong>Session valid</strong>{session.expiresIn ? ` · expires ${session.expiresIn}` : ""}. You can continue without typing your password.</Paragraph>}
                             {!sessionLoading && session && !session.valid && <Paragraph><strong>{protonSessionStatusTitle(session.code)}</strong>{session.error ? ` · ${session.error}` : ""}</Paragraph>}
                             {error && <Paragraph role="alert" aria-live="assertive"><strong>{error}</strong></Paragraph>}
-                            {!!username.trim() && !sessionLoading && <Button onClick={() => void checkSession(username)} disabled={busy}>Verificar sessão novamente</Button>}
+                            {!!username.trim() && !sessionLoading && <Button onClick={() => void checkSession(username)} disabled={busy}>Check session again</Button>}
                             <Button onClick={() => switchVpnMode("custom")} disabled={busy || sessionLoading}>
-                                Usar minha própria VPN (Mullvad ou outro WireGuard)
+                                Use my own VPN (Mullvad or another WireGuard)
                             </Button>
-                            <Paragraph>Tem Mullvad ou outra VPN com arquivo .conf? Troque o modo agora e importe o arquivo na próxima etapa, sem login Proton.</Paragraph>
+                            <Paragraph>Have Mullvad or another VPN with a .conf file? Switch modes now and import the file in the next step, with no Proton sign-in.</Paragraph>
                         </>
                     )}
                     </div>
                 )}
                 {page === "route" && (
                     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                    <Paragraph>{customMode ? "O plugin vai validar a configuração WireGuard escolhida nas opções. O túnel WireGuard isola apenas o cliente Discord (via AllowedApps no Windows ou network namespace no Linux); probes de rede são diagnósticos de conectividade e não comprovam localização geográfica." : "O plugin pode escolher a rota automaticamente ou você pode escolher uma rota Proton na lista abaixo. O túnel WireGuard isola apenas o cliente Discord (via AllowedApps no Windows ou network namespace no Linux); probes de rede são diagnósticos de conectividade e não comprovam localização geográfica."}</Paragraph>
+                    <Paragraph>{customMode ? "The plugin will validate the WireGuard config chosen in the options. The WireGuard tunnel isolates only the Discord client (through AllowedApps on Windows or a network namespace on Linux). Network probes are connectivity diagnostics and don't prove geographic location." : "The plugin can choose the route automatically, or you can choose a Proton route from the list below. The WireGuard tunnel isolates only the Discord client (through AllowedApps on Windows or a network namespace on Linux). Network probes are connectivity diagnostics and don't prove geographic location."}</Paragraph>
                     {customMode ? (
                         <>
                         <div style={onboardingBoxStyle} role="status" aria-live="polite" aria-busy={busy}>
-                            <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}><strong>Estado da rota</strong><span>{phaseLabel}</span></div>
-                            {(progressPercent !== null || progressIsIndeterminate) && <progress {...(progressPercent === null ? {} : { value: progressPercent })} max={100} aria-label="Progresso da validação da rota" aria-valuetext={progressPercent === null ? "Validação em andamento; total ainda não conhecido" : `${progressPercent}%`} style={{ width: "100%", marginTop: "12px" }} />}
-                            {progress && progress.total > 0 && <Paragraph>{progress.tested} de {progress.total} servidores testados · {progress.succeeded} aprovados</Paragraph>}
-                            {progress?.server && <Paragraph>Servidor selecionado: {progress.server}</Paragraph>}
-                            {typeof progress?.pingMs === "number" && <Paragraph>Latência medida: {progress.pingMs} ms</Paragraph>}
-                            {progress?.phase === "completed" && <Paragraph>A rota WireGuard foi validada com sucesso. Clique em Continuar e, ao concluir, o plugin ativa o túnel e reinicia o Discord.</Paragraph>}
+                            <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}><strong>Route state</strong><span>{phaseLabel}</span></div>
+                            {(progressPercent !== null || progressIsIndeterminate) && <progress {...(progressPercent === null ? {} : { value: progressPercent })} max={100} aria-label="Route validation progress" aria-valuetext={progressPercent === null ? "Validation running; total not known yet" : `${progressPercent}%`} style={{ width: "100%", marginTop: "12px" }} />}
+                            {progress && progress.total > 0 && <Paragraph>{progress.tested} of {progress.total} servers tested · {progress.succeeded} passed</Paragraph>}
+                            {progress?.server && <Paragraph>Selected server: {progress.server}</Paragraph>}
+                            {typeof progress?.pingMs === "number" && <Paragraph>Measured latency: {progress.pingMs} ms</Paragraph>}
+                            {progress?.phase === "completed" && <Paragraph>The WireGuard route was validated. Click Continue and, when you finish, the plugin turns on the tunnel and restarts Discord.</Paragraph>}
                         </div>
                         {error && <Paragraph role="alert" aria-live="assertive"><strong>{error}</strong></Paragraph>}
                         </>
@@ -1690,10 +1708,10 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                             optimization={{ active: busy, label: vpnRouteStateLabel({ status: vpnStatus, optimizing: busy, optimizationNotice: phaseLabel }), error: routeFailure, progress }}
                             applyingServer={routeSelection.applyingServer}
                             selectionError={routeSelection.selectionError}
-                            lockedReason={routeSelectionActive ? null : "Entre com uma conta Proton válida para listar as rotas."}
+                            lockedReason={routeSelectionActive ? null : "Sign in with a valid Proton account to list the routes."}
                             emptyMessage={routeSelection.discovery.active
-                                ? "Buscando rotas Proton e medindo ping…"
-                                : "Nenhuma rota Proton foi catalogada. Otimize automaticamente ou use \"Buscar rotas novamente\"."}
+                                ? "Finding Proton routes and measuring ping…"
+                                : "No Proton route was cataloged. Optimize automatically or use \"Find routes again\"."}
                             activeRoute={vpnStatus?.route ?? null}
                             routeActive={Boolean(vpnStatus?.active)}
                             onOptimize={() => void optimizeRoute()}
@@ -1707,13 +1725,13 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                 {page === "ready" && (
                     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                     <div style={onboardingBoxStyle} role="status" aria-live="polite">
-                        <Paragraph>{customMode ? "A configuração WireGuard personalizada passou na validação com sucesso. Ao concluir, o plugin ativa o túnel e reinicia o Discord para a rota já valer. Probes de rede são diagnósticos de conectividade e não comprovam localização geográfica." : `${routeSource === "manual" ? "A rota Proton escolhida na lista" : "A rota Proton real"} foi preparada com sucesso. Ao concluir, o plugin ativa o túnel e reinicia o Discord para a rota já valer. Probes de rede são diagnósticos de conectividade e não comprovam localização geográfica.`}</Paragraph>
+                        <Paragraph>{customMode ? "The custom WireGuard config passed validation. When you finish, the plugin turns on the tunnel and restarts Discord so the route takes effect. Network probes are connectivity diagnostics and don't prove geographic location." : `${routeSource === "manual" ? "The Proton route chosen from the list" : "The real Proton route"} is ready. When you finish, the plugin turns on the tunnel and restarts Discord so the route takes effect. Network probes are connectivity diagnostics and don't prove geographic location.`}</Paragraph>
                         {vpnStatus?.platform === "linux" && (
-                            <Paragraph>No Linux, a ativação moverá o cliente Discord para um network namespace exclusivo, solicitando elevação (pkexec) se necessário e relançando o cliente.</Paragraph>
+                            <Paragraph>On Linux, turning on moves the Discord client into its own network namespace, asks for elevation (pkexec) if needed and relaunches the client.</Paragraph>
                         )}
-                        {routeSource === "manual" && manualRouteServer && <Paragraph>Servidor escolhido na lista: {manualRouteServer}</Paragraph>}
-                        {routeSource !== "manual" && progress?.server && <Paragraph>Servidor escolhido: {progress.server}</Paragraph>}
-                        {typeof progress?.downloadMbps === "number" && typeof progress.uploadMbps === "number" && <Paragraph>Teste medido: {progress.downloadMbps} Mbps down · {progress.uploadMbps} Mbps up</Paragraph>}
+                        {routeSource === "manual" && manualRouteServer && <Paragraph>Server chosen from the list: {manualRouteServer}</Paragraph>}
+                        {routeSource !== "manual" && progress?.server && <Paragraph>Chosen server: {progress.server}</Paragraph>}
+                        {typeof progress?.downloadMbps === "number" && typeof progress.uploadMbps === "number" && <Paragraph>Measured: {progress.downloadMbps} Mbps down · {progress.uploadMbps} Mbps up</Paragraph>}
                     </div>
                     </div>
                 )}
@@ -1887,7 +1905,7 @@ function PluginUpdateSettings() {
         let disposed = false;
         const isRevisionCurrent = () => !disposed && isCurrent(revision);
         setState({
-            label: `v${status?.current || PLUGIN_VERSION} · instalada`,
+            label: `v${status?.current || PLUGIN_VERSION} · installed`,
             tone: "neutral",
             available: false
         });
@@ -2059,13 +2077,19 @@ const settings = definePluginSettings({
         default: false,
         hidden: true,
     },
+    goLive: {
+        type: OptionType.BOOLEAN,
+        description: "Keep Go Live on whenever Discord is open.",
+        default: false,
+        hidden: true,
+    },
     vpnMode: {
         type: OptionType.SELECT,
         hidden: true,
         description: "WireGuard route for this Discord only. The rest of the computer stays on your normal network.",
         options: [
-            { label: "ProtonVPN (recomendado)", value: "proton", default: true },
-            { label: "Arquivo WireGuard personalizado", value: "custom" }
+            { label: "ProtonVPN (recommended)", value: "proton", default: true },
+            { label: "Custom WireGuard file", value: "custom" }
         ]
     },
     customConfigPath: {
@@ -2117,35 +2141,60 @@ interface PluginVpnStatus {
     interfaceName?: string | null;
     requiresRelaunch?: boolean;
     dependencies?: string[];
+    goLive?: GoLiveStatus | null;
     externalReason: string | null;
     lastDiagnostic: { detail: string; ok?: boolean; kind?: string } | null;
     message: string;
     sessionStorage?: "safe-storage" | "file" | "memory-only";
     /** Rota do perfil ativo (o plugin novo envia; uma versão antiga do plugin deixa ausente). */
     route?: VpnRouteInfo | null;
-    appsOutdated?: boolean;
 }
+
+// Último estado conhecido: o painel abre com ele na hora e atualiza em segundo plano.
+let cachedStatus: PluginVpnStatus | null = null;
+let cachedUsername = "";
+let cachedSession: { username: string; value: ProtonSessionCheck; checkedAt: number; } | null = null;
+let onStatusCached: ((status: PluginVpnStatus) => void) | null = null;
+
+// O bloqueio vale pela sessão inteira: ligar o túnel depois não muda o que o servidor decidiu.
+const sessionNeedsReconnect = (goLive: GoLiveStatus | null | undefined) => goLive?.state === "active" && videoIsBlocked();
+
+async function turnOnGoLive(): Promise<GoLiveStatus | null> {
+    if (typeof Native?.setGoLive !== "function") return null;
+    settings.store.goLive = true;
+    const goLive = await Native.setGoLive(true) as GoLiveStatus | null;
+    if (sessionNeedsReconnect(goLive)) setTimeout(() => location.reload(), 500);
+    return goLive;
+}
+
+function cacheStatus(status: PluginVpnStatus) {
+    cachedStatus = status;
+    onStatusCached?.(status);
+}
+
+const isSessionCacheFresh = (username: string) =>
+    cachedSession?.username === username && Date.now() - cachedSession.checkedAt < PANEL_CACHE_MS;
 
 function useVpnPanelController(): ControlPanelController {
     const { vpnMode, customConfigPath, protonCountry, protonFreeOnly, protonAutoPing } = settings.use(["vpnMode", "customConfigPath", "protonCountry", "protonFreeOnly", "protonAutoPing"]);
     const customMode = vpnMode === "custom";
-    const [status, setStatus] = useState<PluginVpnStatus | null>(null);
-    const [username, setUsername] = useState("");
+    const [status, setStatus] = useState<PluginVpnStatus | null>(cachedStatus);
+    const [username, setUsername] = useState(cachedUsername);
     const [password, setPassword] = useState("");
     const [twoFactorCode, setTwoFactorCode] = useState("");
     const [busy, setBusy] = useState(false);
     const [optimizing, setOptimizing] = useState(false);
     const [loginActive, setLoginActive] = useState(false);
     const [loginCancelRequested, setLoginCancelRequested] = useState(false);
-    const [session, setSession] = useState<ProtonSessionCheck | null>(null);
+    const [session, setSession] = useState<ProtonSessionCheck | null>(cachedSession?.username === cachedUsername ? cachedSession.value : null);
     const [loginError, setLoginError] = useState<string | null>(null);
     const [optimizationError, setOptimizationError] = useState<string | null>(null);
-    const [optimizationNotice, setOptimizationNotice] = useState("pronta para otimizar");
+    const [optimizationNotice, setOptimizationNotice] = useState("ready to optimize");
     const mountedRef = React.useRef(false);
-    const usernameRef = React.useRef("");
+    const usernameRef = React.useRef(cachedUsername);
     const refreshRequestRef = React.useRef(0);
     const sessionRequestRef = React.useRef(0);
-    const checkedUsernameRef = React.useRef("");
+    const checkedUsernameRef = React.useRef(cachedSession?.username === cachedUsername ? cachedUsername : "");
     const loginRequestIdRef = React.useRef<string | null>(null);
     const passwordRef = React.useRef<HTMLInputElement | null>(null);
     const routeSelectionActive = !customMode && session?.valid === true;
@@ -2168,6 +2217,7 @@ function useVpnPanelController(): ControlPanelController {
         const request = ++sessionRequestRef.current;
         try {
             const result = await native.checkProtonSession(value.trim()) as ProtonSessionCheck;
+            cachedSession = { username: value.trim(), value: result, checkedAt: Date.now() };
             if (mountedRef.current && request === sessionRequestRef.current) setSession(result);
         } catch {
             if (mountedRef.current && request === sessionRequestRef.current) {
@@ -2176,7 +2226,7 @@ function useVpnPanelController(): ControlPanelController {
         }
     };
 
-    const refresh = async () => {
+    const refresh = async (force = false) => {
         if (!Native) return;
         const request = ++refreshRequestRef.current;
         const isCurrent = () => mountedRef.current && request === refreshRequestRef.current;
@@ -2184,6 +2234,7 @@ function useVpnPanelController(): ControlPanelController {
             const [nextStatus, saved] = await Promise.all([Native.getVpnStatus(), Native.getProtonSettings()]);
             if (!isCurrent()) return;
             setStatus(nextStatus as PluginVpnStatus);
+            cacheStatus(nextStatus as PluginVpnStatus);
             const savedRecord = saved as { protonUsername?: unknown; sessionUsername?: unknown };
             const savedUsername = typeof savedRecord.protonUsername === "string" && savedRecord.protonUsername
                 ? savedRecord.protonUsername
@@ -2192,8 +2243,9 @@ function useVpnPanelController(): ControlPanelController {
                 usernameRef.current = savedUsername;
                 setUsername(savedUsername);
             }
+            if (typeof savedUsername === "string") cachedUsername = savedUsername;
             const checkTarget = typeof savedUsername === "string" && savedUsername ? savedUsername : "";
-            if (checkTarget && checkedUsernameRef.current !== checkTarget) {
+            if (checkTarget && (force || checkedUsernameRef.current !== checkTarget || !isSessionCacheFresh(checkTarget))) {
                 checkedUsernameRef.current = checkTarget;
                 void checkSession(checkTarget);
             }
@@ -2208,7 +2260,7 @@ function useVpnPanelController(): ControlPanelController {
     useEffect(() => {
         mountedRef.current = true;
         void refresh();
-        const timer = setInterval(() => void refresh(), 5_000);
+        const timer = setInterval(() => void refresh(), 15_000);
         return () => {
             mountedRef.current = false;
             refreshRequestRef.current++;
@@ -2339,7 +2391,7 @@ function useVpnPanelController(): ControlPanelController {
             showToast(
                 status?.active
                     ? "Proton route ready and applied to this Discord session."
-                    : "Proton route ready. Turn on the bypass to use it; Discord will restart.",
+                    : "Proton route ready.",
                 "success"
             );
             await refresh();
@@ -2405,9 +2457,11 @@ function useVpnPanelController(): ControlPanelController {
         activationBlockReason,
         canActivate,
         goLiveBlocked: videoIsBlocked(),
+        needsReconnect: sessionNeedsReconnect(status?.goLive),
         setUsername: value => {
             if (!protonUsernamesMatch(value, username)) {
                 checkedUsernameRef.current = "";
+                cachedSession = null;
                 setSession(null);
                 setLoginError(null);
                 setPassword("");
@@ -2422,13 +2476,21 @@ function useVpnPanelController(): ControlPanelController {
         setProtonCountry: value => { settings.store.protonCountry = value; },
         setProtonFreeOnly: value => { settings.store.protonFreeOnly = value; },
         setProtonAutoPing: value => { settings.store.protonAutoPing = value; },
-        refresh,
+        refresh: async () => {
+            await Native?.checkGoLive?.();
+            await refresh(true);
+        },
         activate: () => void call(() => Native!.enable()),
-        deactivate: () => void call(() => Native!.shutdown(), "Bypass is off. Discord will reconnect on its own."),
-        reconnect: () => void call(async () => {
-            const stopped = await Native!.shutdown();
-            return stopped.success === false ? stopped : Native!.enable();
+        goLive: () => void call(async () => {
+            const goLive = await turnOnGoLive();
+            return { success: goLive?.state === "active", error: goLive?.error ?? "Go Live didn't start." };
         }),
+        turnOffGoLive: () => void call(async () => {
+            settings.store.goLive = false;
+            await Native!.setGoLive(false);
+            return { success: true };
+        }, "Go Live is off."),
+        reconnect: () => location.reload(),
         restartClient: () => void call(() => (typeof Native?.restartDiscord === "function" ? Native.restartDiscord() : Native!.enable()), "Restarting Discord…"),
         restoreNetwork: () => void call(() => Native!.restoreNetwork(), "Network restored."),
         testConfig: () => void call(() => Native!.testWireGuardConfig(customConfigPath), "File tested."),
@@ -2441,6 +2503,7 @@ function useVpnPanelController(): ControlPanelController {
             // pendente são cancelados e apagados da interface.
             checkedUsernameRef.current = "";
             sessionRequestRef.current++;
+            cachedSession = null;
             setSession(null);
             return result;
         }, "Signed out of Proton."),
@@ -2475,20 +2538,22 @@ function openControlPanel() {
 }
 
 function ControlPanelButton() {
-    const [tone, setTone] = useState<PanelTone>("off");
+    const [tone, setTone] = useState<PanelTone>(() => panelTone(cachedStatus));
 
     useEffect(() => {
         let cancelled = false;
+        onStatusCached = status => setTone(panelTone(status));
         const read = () => {
             if (document.hidden || !Native) return;
             void Native.getVpnStatus()
-                .then(status => { if (!cancelled) setTone(panelTone(status as PluginVpnStatus)); })
+                .then(status => { if (!cancelled) cacheStatus(status as PluginVpnStatus); })
                 .catch(error => recordRendererError("Falha ao ler o estado para o ícone do topo", error));
         };
         read();
-        const timer = setInterval(read, 15_000);
+        const timer = setInterval(read, 60_000);
         return () => {
             cancelled = true;
+            onStatusCached = null;
             clearInterval(timer);
         };
     }, []);
@@ -2601,7 +2666,9 @@ function reportSession() {
     // Discord conectar e continua isolado por aplicativo. Este registro é somente
     // diagnóstico e não tenta recarregar ou trocar a saída no meio da mídia.
     Native.getVpnStatus().then(status => {
-        record(`sessao aberta | VPN ${status.state} | ativa ${status.active} | ownership ${status.owned}`);
+        const { goLive } = (status as PluginVpnStatus);
+        record(`sessao aberta | VPN ${status.state} | ativa ${status.active} | ownership ${status.owned} | Go Live ${goLive?.state ?? "-"} | rota ${goLive?.server ?? "-"} | saida ${goLive?.country ?? "-"} | ${goLive?.latencyMs ?? "-"} ms | video bloqueado ${videoIsBlocked()}`);
+        if (goLive?.state === "fallback") showToast("GoLiveBypass: no route is responding, so Discord connected on your normal network.", "failure");
         if (videoIsBlocked()) record("o servidor ainda reporta o guard de video; nenhuma troca automatica de rede foi feita");
     }).catch(error => recordRendererError("Falha ao consultar a VPN do plugin", error));
 }
@@ -3029,7 +3096,7 @@ export default definePlugin({
     commands: [
         {
             name: "golivebypass",
-            description: "Copia um diagnostico do plugin para voce colar no suporte.",
+            description: "Copies plugin diagnostics for you to paste in support.",
             async execute(_args, ctx) {
                 const report = await buildReport();
                 copyWithToast(report, "Diagnostics copied. Paste them in the support channel.");
@@ -3081,6 +3148,11 @@ export default definePlugin({
         // principal faz a checagem/download; o renderer observa continuamente se há
         // reload pendente ou uma falha nova, inclusive depois da primeira consulta.
         schedulePluginUpdateStatusObservation(lifecycleGeneration);
+
+        if (typeof Native?.setGoLive === "function") {
+            void Promise.resolve(Native.setGoLive(settings.store.goLive === true))
+                .catch(error => recordRendererError("Falha ao sincronizar o Go Live", error));
+        }
 
         // A primeira execução precisa deixar o usuário atravessar as três etapas do
         // assistente antes de qualquer ativação que possa relançar o Discord.

@@ -287,7 +287,7 @@ export function protonRouteLocation(candidate: ProtonRouteCatalogEntry): string 
 export function protonRouteTierLabel(candidate: ProtonRouteCatalogEntry): string | undefined {
     const parts: string[] = [];
     if (typeof candidate.tier === "string" && candidate.tier.trim() !== "") parts.push(candidate.tier);
-    if (typeof candidate.load === "number" && Number.isFinite(candidate.load)) parts.push(`carga ${Math.round(candidate.load)}%`);
+    if (typeof candidate.load === "number" && Number.isFinite(candidate.load)) parts.push(`load ${Math.round(candidate.load)}%`);
     return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
@@ -340,10 +340,10 @@ const PROTON_LOGIN_MESSAGES: Record<ProtonLoginPresentationCode, string> = {
     CAPTCHA_CANCELLED: "The Proton check was cancelled.",
     CANCELLED: "Proton sign-in cancelled. You can try again.",
     NETWORK_ERROR: "Couldn't reach the ProtonVPN servers. Check your network and try again.",
-    TIMEOUT: "O ProtonVPN demorou demais para responder. Tente novamente.",
+    TIMEOUT: "ProtonVPN took too long to respond. Try again.",
     MISSING_EXECUTABLE: "The ProtonVPN component is missing from the plugin. Reinstall or update it.",
     SESSION_PERSISTENCE: "Sign-in worked, but the plugin couldn't reach secure session storage.",
-    HELPER_ERROR: "O componente ProtonVPN falhou antes de concluir o login. Reinicie o Discord e tente novamente.",
+    HELPER_ERROR: "The ProtonVPN component failed before finishing sign-in. Restart Discord and try again.",
     CONFIGURATION_ERROR: "The plugin configuration is incomplete or incompatible.",
     UNKNOWN: "Proton refused or didn't finish the sign-in for an unknown reason.",
 };

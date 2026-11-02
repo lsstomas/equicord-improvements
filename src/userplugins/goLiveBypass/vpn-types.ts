@@ -114,8 +114,6 @@ export interface VpnStatus {
     sessionStorage?: ProtonSessionStorage;
     /** Rota do perfil ativo; null quando não há perfil gravado. */
     route?: VpnRouteInfo | null;
-    /** O túnel ativo aponta para outra versão do Discord, que ficou fora do filtro. */
-    appsOutdated?: boolean;
 }
 
 export type VpnOperationCode =
@@ -176,22 +174,23 @@ export function formatAllowedApps(paths: string[]): string {
         const value = raw.trim();
         if (!value) continue;
         if (/[\r\n,]/.test(value)) {
-            throw new Error(`Caminho incompatível com AllowedApps: ${value.replace(/[\r\n]/g, " ")}`);
+            throw new Error(`Path not compatible with AllowedApps: ${value.replace(/[\r\n]/g, " ")}`);
         }
         const key = value.toLowerCase();
         if (!unique.has(key)) unique.set(key, value);
     }
-    if (unique.size === 0) throw new Error("Nenhum executável do Discord foi encontrado para o filtro WireSock.");
+    if (unique.size === 0) throw new Error("No Discord executable was found for the WireSock filter.");
     return [...unique.values()].join(", ");
 }
 
-export function sanitizeWireGuardConfig(raw: string, allowedApps: string): string {
-    if (!raw.trim()) throw new Error("A configuração WireGuard está vazia.");
-    if (!allowedApps.trim()) throw new Error("AllowedApps não pode ficar vazio.");
+export function sanitizeWireGuardConfig(raw: string, allowedApps: string, allowedIps?: string): string {
+    if (!raw.trim()) throw new Error("The WireGuard config is empty.");
+    if (!allowedApps.trim()) throw new Error("AllowedApps can't be empty.");
 
     const lines = raw.split(/\r?\n/).map(line => {
         if (/^\s*DNS\s*=/i.test(line)) return "";
         if (/^\s*(?:#@ws:)?AllowedApps\s*=/i.test(line)) return `#@ws:AllowedApps = ${allowedApps}`;
+        if (allowedIps && /^\s*AllowedIPs\s*=/i.test(line)) return `AllowedIPs = ${allowedIps}`;
         return line;
     });
     if (!lines.some(line => /^\s*#@ws:AllowedApps\s*=/i.test(line)))
@@ -219,16 +218,16 @@ function configValue(raw: string, section: string, key: string): string {
 
 export function validateWireGuardConfig(raw: string): WireGuardConfigValidation {
     const text = raw.trim();
-    if (!text) return { valid: false, error: "A configuração WireGuard está vazia." };
-    if (!/^\s*\[Interface\]\s*$/im.test(text)) return { valid: false, error: "A configuração não contém a seção [Interface]." };
-    if (!/^\s*\[Peer\]\s*$/im.test(text)) return { valid: false, error: "A configuração não contém a seção [Peer]." };
+    if (!text) return { valid: false, error: "The WireGuard config is empty." };
+    if (!/^\s*\[Interface\]\s*$/im.test(text)) return { valid: false, error: "The config has no [Interface] section." };
+    if (!/^\s*\[Peer\]\s*$/im.test(text)) return { valid: false, error: "The config has no [Peer] section." };
     const privateKey = configValue(text, "interface", "PrivateKey");
-    if (!privateKey) return { valid: false, error: "A configuração não contém PrivateKey." };
-    if (!isValidWireGuardKey(privateKey)) return { valid: false, error: "PrivateKey inválida: esperada uma chave WireGuard Base64 de 32 bytes." };
-    if (!configValue(text, "interface", "Address")) return { valid: false, error: "A configuração não contém Address." };
+    if (!privateKey) return { valid: false, error: "The config has no PrivateKey." };
+    if (!isValidWireGuardKey(privateKey)) return { valid: false, error: "Invalid PrivateKey: expected a 32-byte Base64 WireGuard key." };
+    if (!configValue(text, "interface", "Address")) return { valid: false, error: "The config has no Address." };
     const publicKey = configValue(text, "peer", "PublicKey");
-    if (!publicKey) return { valid: false, error: "A configuração não contém PublicKey." };
-    if (!isValidWireGuardKey(publicKey)) return { valid: false, error: "PublicKey inválida: esperada uma chave WireGuard Base64 de 32 bytes." };
+    if (!publicKey) return { valid: false, error: "The config has no PublicKey." };
+    if (!isValidWireGuardKey(publicKey)) return { valid: false, error: "Invalid PublicKey: expected a 32-byte Base64 WireGuard key." };
     const allowedIps = configValue(text, "peer", "AllowedIPs").split(",").map(value => value.trim());
     // Alguns provedores (Proton, entre outros) anunciam a rota padrão como as duas
     // metades 0.0.0.0/1 + 128.0.0.0/1 em vez de 0.0.0.0/0 — é a mesma rota.
@@ -237,11 +236,11 @@ export function validateWireGuardConfig(raw: string): WireGuardConfigValidation 
     const hasDefaultV6 = allowedIps.includes("::/0")
         || (allowedIps.includes("::/1") && allowedIps.includes("8000::/1"));
     if (!hasDefaultV4 && !hasDefaultV6)
-        return { valid: false, error: "A configuração precisa anunciar uma rota padrão em AllowedIPs: 0.0.0.0/0 (ou as metades 0.0.0.0/1 + 128.0.0.0/1) ou ::/0." };
+        return { valid: false, error: "The config must announce a default route in AllowedIPs: 0.0.0.0/0 (or the halves 0.0.0.0/1 + 128.0.0.0/1) or ::/0." };
     const endpoint = configValue(text, "peer", "Endpoint");
     const endpointMatch = /^(?:[^\s:[\]]+|\[[^\]]+\]):(\d{1,5})$/.exec(endpoint);
     if (!endpointMatch || Number(endpointMatch[1]) < 1 || Number(endpointMatch[1]) > 65535)
-        return { valid: false, error: "A configuração não contém um Endpoint válido." };
+        return { valid: false, error: "The config has no valid Endpoint." };
     return { valid: true };
 }
 
@@ -281,7 +280,7 @@ export function formatVpnRouteSummary(route: VpnRouteInfo | null | undefined): s
     if (!route) return null;
     const parts: string[] = [];
     if (route.server) parts.push(route.server);
-    else parts.push(route.mode === "custom" ? "arquivo .conf personalizado" : "perfil Proton");
+    else parts.push(route.mode === "custom" ? "custom .conf file" : "Proton profile");
     if (route.endpoint) parts.push(route.endpoint);
     return parts.join(" · ");
 }
@@ -295,19 +294,19 @@ export function vpnRouteStateLabel(input: {
     optimizing: boolean;
     optimizationNotice: string;
 }): string {
-    if (input.optimizing) return "otimizando a rota automaticamente";
+    if (input.optimizing) return "optimizing the route automatically";
     const { status } = input;
     if (!status) return input.optimizationNotice;
-    if (status.active || status.state === "active") return "ativa";
+    if (status.active || status.state === "active") return "active";
     switch (status.state) {
-        case "authorizing": return "aguardando autorização";
-        case "preparing": return "preparando o túnel";
-        case "starting": return "iniciando o túnel";
-        case "restart_pending": return "reinicie o Discord para concluir";
-        case "stopping": return "desativando";
-        case "blocked_external": return "bloqueada por outro WireSock ativo";
-        case "dependency_missing": return "dependências do sistema ausentes";
-        case "recovery_required": return "recuperação necessária";
+        case "authorizing": return "waiting for authorization";
+        case "preparing": return "preparing the tunnel";
+        case "starting": return "starting the tunnel";
+        case "restart_pending": return "restart Discord to finish";
+        case "stopping": return "turning off";
+        case "blocked_external": return "blocked by another active WireSock";
+        case "dependency_missing": return "system dependencies missing";
+        case "recovery_required": return "recovery needed";
         default: return input.optimizationNotice;
     }
 }

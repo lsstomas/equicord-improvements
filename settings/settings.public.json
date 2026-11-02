@@ -43,7 +43,7 @@
             "enabled": false
         },
         "AlwaysExpandProfiles": {
-            "enabled": true
+            "enabled": false
         },
         "AlwaysExpandRoles": {
             "enabled": false,
@@ -1448,7 +1448,7 @@
             "ignoreFonts": false,
             "friendNameOnlyInDirectMessages": false,
             "customNameOnlyInDirectMessages": false,
-            "triggerNameRerender": true,
+            "triggerNameRerender": false,
             "typingIndicator": true,
             "alwaysHaveGradientsActive": false,
             "ignoreEffects": true,

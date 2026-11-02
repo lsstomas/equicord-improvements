@@ -21,7 +21,7 @@ Instructions for an AI agent installing these plugins for a user.
 ## Verify
 
 - `node_modules/.bin/tsc --noEmit` passes in the Equicord folder.
-- All four tests pass: `node scripts/testVoiceChannelHistory.mjs`, `testUserplugins.mjs`, `testActivityTracker.mjs` and `testToastVoiceTracking.mjs`.
+- All five tests pass: `node scripts/testVoiceChannelHistory.mjs`, `testUserplugins.mjs`, `testActivityTracker.mjs`, `testToastVoiceTracking.mjs` and `testGoLive.mjs`.
 - The radar icon appears in Discord's top bar and opens the dashboard.
 
 ## If something fails

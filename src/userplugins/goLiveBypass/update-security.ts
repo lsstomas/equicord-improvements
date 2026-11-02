@@ -97,16 +97,16 @@ function hasOfficialUpdatePath(parsed: URL, hostname: string): boolean {
 
 export function securePluginUpdateUrl(rawUrl: string, baseUrl?: string): string {
   const parsed = new URL(rawUrl, baseUrl);
-  if (parsed.protocol !== "https:") throw new Error("update recusou URL que não usa HTTPS");
+  if (parsed.protocol !== "https:") throw new Error("update refused a URL that doesn't use HTTPS");
   if (parsed.username || parsed.password || parsed.port) {
-    throw new Error("update recusou URL com credenciais ou porta explícita");
+    throw new Error("update refused a URL with credentials or an explicit port");
   }
   const hostname = normalizedHostname(parsed.hostname);
   if (!TRUSTED_UPDATE_HOSTS.has(hostname)) {
-    throw new Error("update recusou host fora do GitHub e seus CDNs oficiais");
+    throw new Error("update refused a host outside GitHub and its official CDNs");
   }
-  if (containsPathTraversal(rawUrl, parsed)) throw new Error("update recusou caminho com traversal");
-  if (!hasOfficialUpdatePath(parsed, hostname)) throw new Error("update recusou caminho fora da origem oficial");
+  if (containsPathTraversal(rawUrl, parsed)) throw new Error("update refused a path with traversal");
+  if (!hasOfficialUpdatePath(parsed, hostname)) throw new Error("update refused a path outside the official origin");
   return parsed.toString();
 }
 

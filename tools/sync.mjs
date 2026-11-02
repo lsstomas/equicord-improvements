@@ -18,7 +18,7 @@ const LOGS = join(homedir(), "Documents", "Equicord Logs");
 
 const USER_PLUGINS = ["activityTracker", "clientModDetector", "fakeDeafen", "fakeMedia", "goLiveBypass", "lastMessageDate", "voiceFakeDetector"];
 const EDITED_PLUGINS = ["toastNotifications", "voiceChannelLog"];
-const TESTS = ["testActivityTracker.mjs", "testToastVoiceTracking.mjs", "testUserplugins.mjs", "testVoiceChannelHistory.mjs"];
+const TESTS = ["testActivityTracker.mjs", "testGoLive.mjs", "testToastVoiceTracking.mjs", "testUserplugins.mjs", "testVoiceChannelHistory.mjs"];
 
 const LAST_ONLINE_COMMIT = "493727b2b3d048dd28fe2cab5921117621ac8b92";
 const LAST_ONLINE_URL = `https://raw.githubusercontent.com/k1ng0p/LastOnlineTracker/${LAST_ONLINE_COMMIT}/index.tsx`;
@@ -59,7 +59,11 @@ writeFileSync(join(ROOT, "patches/lastOnlineTracker.patch"), patch);
 
 const settingsText = readFileSync(SETTINGS, "utf8");
 mkdirSync(join(ROOT, "settings"), { recursive: true });
-writeFileSync(join(ROOT, "settings/settings.public.json"), `${JSON.stringify(sanitizeSettings(JSON.parse(settingsText)), null, 4)}\n`);
+const publicSettings = sanitizeSettings(JSON.parse(settingsText));
+// Go Live starts a tunnel, so it has to be each person's own choice.
+delete publicSettings.plugins.GoLiveBypass?.goLive;
+delete publicSettings.plugins.GoLiveBypass?.gatewayProxy;
+writeFileSync(join(ROOT, "settings/settings.public.json"), `${JSON.stringify(publicSettings, null, 4)}\n`);
 
 const names = [];
 if (existsSync(join(LOGS, "VoiceChannelLog"))) names.push(...readdirSync(join(LOGS, "VoiceChannelLog")));

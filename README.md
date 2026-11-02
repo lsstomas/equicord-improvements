@@ -12,7 +12,7 @@ Built and tested against Equicord 1.15.15.0, commit `00abcbeea`.
 | **VoiceChannelLog** | [Equicord](https://github.com/Equicord/Equicord), modified | Saved history of the calls you were in, with filters, search and export |
 | **ToastNotifications** | [Equicord](https://github.com/Equicord/Equicord), modified | Adds a toast when someone on your list joins a call |
 | **FakeDeafen** | [fakedeafen](https://github.com/itskonv1/fakedeafen), modified | Shows you as muted and deafened while you keep hearing |
-| **GoLiveBypass** | [GoLiveBypass](https://github.com/bezumiya/GoLiveBypass), modified | Brings back Go Live and camera in Brazil through a WireGuard tunnel for Discord only, with a control panel in the top bar |
+| **GoLiveBypass** | [GoLiveBypass](https://github.com/bezumiya/GoLiveBypass), modified | Brings back Go Live and camera in Brazil through a WireGuard tunnel for Discord's gateway and media only, with a control panel in the top bar |
 | **FakeMedia** | Original | Shows a camera or screen share without sending anything |
 | **VoiceFakeDetector** | [Endcord](https://github.com/Endcord/Endcord), adapted | Marks people shown as muted who are still sending audio |
 | **ClientModDetector** | Original | Marks people who left visible traces of a modified client |
@@ -45,11 +45,13 @@ To install with an AI agent, give it this:
 
 GoLiveBypass runs on Windows x64 and Linux x64, and needs a ProtonVPN account or your own WireGuard `.conf` file. Open it from the shield icon in Discord's top bar.
 
-- Turning it on restarts Discord and leaves your call. Windows asks for permission the first time, to install WireSock.
-- Only Discord goes through the tunnel. Your browser and other apps stay on your normal network.
-- On Windows, it stays on after you close Discord or restart your computer, until you turn it off in the panel.
-- If the tunnel doesn't respond when Discord opens, a dialog offers to turn it off. After a Discord update, the panel asks you to reconnect.
-- Optimize turns the bypass off while it tests routes, so avoid it during a call.
+- Press **Go Live** once and it stays on every time Discord opens. The first time, Discord reloads once if your session is blocked, and Windows asks for permission to install WireSock.
+- **Turn off** stops the tunnel without restarting Discord. A stream you open after turning it back on goes through the tunnel again.
+- Only Discord's gateway and media use the tunnel. Its API, your browser and other apps stay on your normal network.
+- While it's on, calls go through the route, so voice has more latency.
+- If a route stops responding, it tries that route again and then others. If none responds, Discord stays on your normal network and the panel says so.
+- The camera and screen buttons stay unlocked with Go Live on or off, as long as the plugin is on.
+- Optimize tests routes through the tunnel, so avoid it during a call.
 - On Windows with WSL's mirrored networking, installing the WireSock driver can cut WSL's network until you restart.
 
 Auto-update stays off, because an update would replace the control panel.

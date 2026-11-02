@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { AsyncLocalStorage } from "async_hooks";
 import { RendererSettings } from "@main/settings";
+import { AsyncLocalStorage } from "async_hooks";
 import { execFile, execFileSync, spawn } from "child_process";
 import { createHash, randomUUID } from "crypto";
-import { app, BrowserWindow, dialog, ipcMain, type IpcMainEvent, type IpcMainInvokeEvent, type OpenDialogOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, type IpcMainEvent, type IpcMainInvokeEvent, type OpenDialogOptions, session } from "electron";
 import {
     appendFileSync,
     closeSync,
@@ -52,6 +52,9 @@ import {
     resultadoSegredoRemanescente,
     resultadoTituloObrigatorio,
 } from "./bug-report";
+import { GoLive, shouldStartAtBoot } from "./go-live";
+import { resolveWindowsPnpmBuildCommand } from "./plugin-build";
+import { createOperationId, createPluginLogger, type PluginLogContext,trimJsonlTailByBytes } from "./plugin-log";
 import {
     choosePluginRelease,
     comparePluginVersions,
@@ -60,9 +63,7 @@ import {
     type PluginUpdateChannel,
 } from "./update-channel";
 import { isCompatiblePluginManifest, releaseAssetUrl, securePluginUpdateUrl } from "./update-security";
-import { resolveWindowsPnpmBuildCommand } from "./plugin-build";
 import { defaultPluginVpnDataDir, PluginVpnController, type ProtonLoginPayload, type ProtonOptimizationOptions, type ProtonRouteDiscoveryContext } from "./vpn-controller";
-import { disposeWireSockSnapshotWorker } from "./vpn-snapshot-worker";
 import {
     DEFAULT_AUTH_PROMPT_TIMEOUT_MS,
     findSystemBinary,
@@ -74,8 +75,8 @@ import {
     waitForFile,
 } from "./vpn-linux";
 import * as proton from "./vpn-proton";
+import { disposeWireSockSnapshotWorker } from "./vpn-snapshot-worker";
 import { safeDiagnosticDetail } from "./vpn-types";
-import { createOperationId, createPluginLogger, trimJsonlTailByBytes, type PluginLogContext } from "./plugin-log";
 
 const PLUGIN_VERSION = "2.0.13";
 const PLUGIN_ASSET = "goLiveBypass-vencord.zip";
@@ -153,11 +154,11 @@ export function findLinuxNetnsLauncher(preferredCandidates?: string[], materiali
         }
     }
     try { return proton.materializeEmbeddedLinuxAsset("netns-launcher", materializeDirectory); } catch {}
-    throw new Error("O launcher Linux do namespace não foi encontrado no pacote do plugin.");
+    throw new Error("The Linux namespace launcher wasn't found in the plugin package.");
 }
 async function installFlatpakNetnsLauncher(flatpakSpawn: string, pkexec: string, launcher: string, uid: number): Promise<string> {
     const install = findSystemBinary("install");
-    if (!install) throw new Error("Utilitário 'install' não encontrado no host para preparar o relaunch Flatpak.");
+    if (!install) throw new Error("The 'install' utility wasn't found on the host to prepare the Flatpak relaunch.");
     const destination = `/run/user/${uid}/golivebypass-netns-launcher-${process.pid}-${Date.now()}`;
     const payload = readFileSync(launcher);
     const { promise, resolve, reject } = Promise.withResolvers<string>();
@@ -180,10 +181,10 @@ async function installFlatpakNetnsLauncher(flatpakSpawn: string, pkexec: string,
             return;
         }
         if (/AccessDenied|Portal call failed|Permission denied/i.test(stderr)) {
-            finish(new Error("O cliente Flatpak não possui permissão para preparar o launcher no host. Conceda: flatpak override --user --talk-name=org.freedesktop.Flatpak <app-id>"));
+            finish(new Error("The Flatpak client doesn't have permission to prepare the launcher on the host. Grant it: flatpak override --user --talk-name=org.freedesktop.Flatpak <app-id>"));
             return;
         }
-        finish(new Error(`Não foi possível preparar o launcher Linux no host (código ${code ?? "desconhecido"}): ${stderr.trim()}`));
+        finish(new Error(`Couldn't prepare the Linux launcher on the host (code ${code ?? "unknown"}): ${stderr.trim()}`));
     });
     child.stdin?.once("error", error => finish(error));
     child.stdin?.end(payload);
@@ -482,7 +483,7 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
     }
 
     if (namespace !== null && !isValidLinuxName(namespace)) {
-        throw new Error(`Nome de network namespace inválido para reinício: ${namespace}`);
+        throw new Error(`Invalid network namespace name for restart: ${namespace}`);
     }
 
     const inFlatpak = isLinuxFlatpak();
@@ -499,7 +500,7 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
             }
         }
         if (!flatpakId) {
-            throw new Error("Ambiente Flatpak detectado, mas o identificador da aplicação (FLATPAK_ID) não pôde ser determinado.");
+            throw new Error("Flatpak environment detected, but the app ID (FLATPAK_ID) couldn't be determined.");
         }
     }
 
@@ -579,7 +580,7 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
         if (inFlatpak) {
             const flatpakSpawn = findSystemBinary("flatpak-spawn");
             if (!flatpakSpawn) {
-                throw new Error("Ponte Flatpak ('flatpak-spawn') ausente. Instale o flatpak ou execute o cliente nativo.");
+                throw new Error("Flatpak bridge ('flatpak-spawn') is missing. Install flatpak or run the native client.");
             }
             const args = [
                 "--host",
@@ -600,16 +601,16 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
                         const errStr = `${stderr || ""} ${error.message || ""}`;
                         if (/AccessDenied|Portal call failed|Permission denied/i.test(errStr)) {
                             reject(new Error(
-                                "O cliente Flatpak não possui permissão para executar comandos no host via flatpak-spawn. " +
-                                `Conceda a permissão no terminal: flatpak override --user --talk-name=org.freedesktop.Flatpak ${flatpakId}`
+                                "The Flatpak client doesn't have permission to run commands on the host through flatpak-spawn. " +
+                                `Grant it in a terminal: flatpak override --user --talk-name=org.freedesktop.Flatpak ${flatpakId}`
                             ));
                             return;
                         }
                         if (/Failed to connect to bus|No such file or directory/i.test(errStr) || error.code === "ENOENT") {
-                            reject(new Error("O serviço 'systemd --user' está indisponível ou inacessível no host para realizar o reinício fora do namespace."));
+                            reject(new Error("The 'systemd --user' service is unavailable or unreachable on the host for restarting outside the namespace."));
                             return;
                         }
-                        reject(new Error(`Falha no flatpak-spawn/systemd-run para reinício fora do namespace: ${errStr.trim()}`));
+                        reject(new Error(`flatpak-spawn/systemd-run failed restarting outside the namespace: ${errStr.trim()}`));
                         return;
                     }
                     resolve();
@@ -618,10 +619,10 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
         } else {
             const systemdRun = findSystemBinary("systemd-run");
             if (!systemdRun) {
-                throw new Error("Utilitário 'systemd-run' ausente. O reinício para fora do namespace de rede exige systemd na sessão do usuário.");
+                throw new Error("The 'systemd-run' utility is missing. Restarting outside the network namespace needs systemd in the user session.");
             }
             if (!existsSync(process.execPath)) {
-                throw new Error(`Executável do cliente Discord ausente ou inacessível: ${process.execPath}`);
+                throw new Error(`Discord client executable missing or unreachable: ${process.execPath}`);
             }
             const args = [
                 "--user",
@@ -636,10 +637,10 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
                     if (error) {
                         const errStr = `${stderr || ""} ${error.message || ""}`;
                         if (/Failed to connect to bus|No such file or directory/i.test(errStr)) {
-                            reject(new Error("O serviço 'systemd --user' está indisponível ou inacessível para realizar o reinício fora do namespace."));
+                            reject(new Error("The 'systemd --user' service is unavailable or unreachable for restarting outside the namespace."));
                             return;
                         }
-                        reject(new Error(`Falha ao executar systemd-run para reinício fora do namespace: ${errStr.trim()}`));
+                        reject(new Error(`Couldn't run systemd-run to restart outside the namespace: ${errStr.trim()}`));
                         return;
                     }
                     resolve();
@@ -662,25 +663,25 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
         try {
             const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
             const gid = typeof process.getgid === "function" ? process.getgid() : undefined;
-            if (uid === undefined || gid === undefined) throw new Error("Não foi possível determinar o usuário atual para o relaunch Linux.");
+            if (uid === undefined || gid === undefined) throw new Error("Couldn't determine the current user for the Linux relaunch.");
 
             let command: string;
             let spawnArgs: string[];
             let childEnv: NodeJS.ProcessEnv | undefined;
             if (directNativeLaunch) {
                 if (!existsSync(process.execPath)) {
-                    throw new Error(`Executável do cliente Discord ausente ou inacessível: ${process.execPath}`);
+                    throw new Error(`Discord client executable missing or unreachable: ${process.execPath}`);
                 }
                 command = process.execPath;
                 spawnArgs = clientArgs;
                 childEnv = safeEnv;
             } else {
                 const pkexec = findSystemBinary("pkexec");
-                if (!pkexec) throw new Error("Utilitário 'pkexec' ausente; o relaunch para entrar no namespace Linux exige polkit.");
+                if (!pkexec) throw new Error("The 'pkexec' utility is missing. Relaunching into the Linux namespace needs polkit.");
                 const launcher = findLinuxNetnsLauncher();
                 const target = inFlatpak ? (findSystemBinary("flatpak") || "/usr/bin/flatpak") : process.execPath;
                 if (!inFlatpak && !existsSync(target)) {
-                    throw new Error(`Executável do cliente Discord ausente ou inacessível: ${target}`);
+                    throw new Error(`Discord client executable missing or unreachable: ${target}`);
                 }
                 const targetArgs = inFlatpak
                     ? ["run", `--env=${GOLIVE_PLUGIN_LINUX_NAMESPACE}=${namespace}`, flatpakId!, ...clientArgs]
@@ -701,7 +702,7 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
                 ];
                 if (inFlatpak) {
                     const flatpakSpawn = findSystemBinary("flatpak-spawn");
-                    if (!flatpakSpawn) throw new Error("Ponte Flatpak ('flatpak-spawn') ausente. Conceda acesso ao host ou use o cliente nativo.");
+                    if (!flatpakSpawn) throw new Error("Flatpak bridge ('flatpak-spawn') is missing. Grant host access or use the native client.");
                     temporaryHostLauncher = await installFlatpakNetnsLauncher(flatpakSpawn, pkexec, launcher, uid);
                     command = flatpakSpawn;
                     spawnArgs = ["--host", pkexec, temporaryHostLauncher, ...launcherArgs];
@@ -730,15 +731,15 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
                 if (code === 0 || code === null) {
                     // Saiu cedo mas sem erro: só conta como falha se a confirmação ainda não veio
                     // (o waitForFile decide pelo timeout).
-                    relatarUmaVez(new Error("O relançamento terminou antes de entrar no namespace."));
+                    relatarUmaVez(new Error("The relaunch ended before entering the namespace."));
                     return;
                 }
-                const detail = `${stderrData.trim()} (código ${code}, sinal ${signal})`.trim();
+                const detail = `${stderrData.trim()} (code ${code}, signal ${signal})`.trim();
                 if (/AccessDenied|Portal call failed|Permission denied/i.test(detail)) {
-                    relatarUmaVez(new Error(`O cliente Flatpak não possui permissão para executar o relaunch no host. Conceda: flatpak override --user --talk-name=org.freedesktop.Flatpak ${flatpakId || "<app-id>"}`));
+                    relatarUmaVez(new Error(`The Flatpak client doesn't have permission to relaunch on the host. Grant it: flatpak override --user --talk-name=org.freedesktop.Flatpak ${flatpakId || "<app-id>"}`));
                     return;
                 }
-                relatarUmaVez(new Error(`Relaunch Linux encerrou prematuramente: ${detail}`));
+                relatarUmaVez(new Error(`Linux relaunch ended early: ${detail}`));
             });
             child.unref();
 
@@ -750,7 +751,7 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
             if (resultado !== "confirmado") {
                 if (typeof resultado === "string") {
                     const guidance = linuxAuthorizationGuidance("pkexec", "pkexec");
-                    throw new Error(`O relançamento não confirmou a entrada no namespace em ${Math.round(DEFAULT_AUTH_PROMPT_TIMEOUT_MS / 1000)}s.${guidance ? ` ${guidance}` : ""}`);
+                    throw new Error(`The relaunch didn't confirm entering the namespace within ${Math.round(DEFAULT_AUTH_PROMPT_TIMEOUT_MS / 1000)}s.${guidance ? ` ${guidance}` : ""}`);
                 }
                 throw resultado;
             }
@@ -771,7 +772,7 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
     if (inFlatpak) {
         const flatpakSpawn = findSystemBinary("flatpak-spawn");
         if (!flatpakSpawn) {
-            throw new Error("Ponte Flatpak ('flatpak-spawn') ausente. Instale o flatpak ou execute o cliente nativo.");
+            throw new Error("Flatpak bridge ('flatpak-spawn') is missing. Install flatpak or run the native client.");
         }
         const spawnArgs = [
             "--host",
@@ -792,14 +793,14 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
             child.once("exit", (code, signal) => {
                 if (!settled && code !== 0 && code !== null) {
                     settled = true;
-                    reject(new Error(`Reinício Flatpak encerrou prematuramente (código: ${code}, sinal: ${signal})`));
+                    reject(new Error(`Flatpak restart ended early (code: ${code}, signal: ${signal})`));
                 }
             });
             setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 200);
         });
     } else {
         if (!existsSync(process.execPath)) {
-            throw new Error(`Executável do cliente Discord ausente ou inacessível: ${process.execPath}`);
+            throw new Error(`Discord client executable missing or unreachable: ${process.execPath}`);
         }
         const child = spawn(process.execPath, clientArgs, {
             detached: true,
@@ -844,14 +845,14 @@ function setStoredUsername(username: string): void {
 }
 
 function cleanLoginPayload(value: unknown): ProtonLoginPayload {
-    if (value === null || typeof value !== "object") throw new Error("Informe os dados de login Proton.");
+    if (value === null || typeof value !== "object") throw new Error("Enter your Proton sign-in details.");
     const raw = value as Record<string, unknown>;
     const username = typeof raw.username === "string" ? raw.username.trim().slice(0, 320) : "";
     const password = typeof raw.password === "string" ? raw.password.slice(0, 2048) : undefined;
     const twoFactorCode = typeof raw.twoFactorCode === "string" ? raw.twoFactorCode.trim().slice(0, 64) : undefined;
     const requestId = typeof raw.requestId === "string" ? raw.requestId.trim().slice(0, 120) : undefined;
-    if (!username) throw new Error("Informe o usuário Proton.");
-    if (!password) throw new Error("Informe a senha Proton.");
+    if (!username) throw new Error("Enter the Proton username.");
+    if (!password) throw new Error("Enter the Proton password.");
     return { username, password, twoFactorCode, requestId };
 }
 
@@ -896,13 +897,13 @@ type CaptchaResult =
     | { ok: false; code: "CAPTCHA_CANCELLED" | "CAPTCHA_INVALID"; message: string };
 
 function solveCaptcha(rawUrl: string, parent: BrowserWindow | null, signal?: AbortSignal): Promise<CaptchaResult> {
-    if (signal?.aborted) return Promise.resolve({ ok: false, code: "CAPTCHA_CANCELLED", message: "Verificação cancelada. Nenhuma credencial foi alterada." });
+    if (signal?.aborted) return Promise.resolve({ ok: false, code: "CAPTCHA_CANCELLED", message: "Check cancelled. No credentials were changed." });
     const challenge = proton.parseCaptchaUrl(rawUrl);
-    if (!challenge) return Promise.resolve({ ok: false, code: "CAPTCHA_INVALID", message: "O Proton forneceu um endereço de CAPTCHA inválido." });
+    if (!challenge) return Promise.resolve({ ok: false, code: "CAPTCHA_INVALID", message: "Proton gave an invalid CAPTCHA address." });
 
     let preload: string;
     try { preload = writeCaptchaPreload(); }
-    catch { return Promise.resolve({ ok: false, code: "CAPTCHA_INVALID", message: "Não foi possível preparar a captura do CAPTCHA." }); }
+    catch { return Promise.resolve({ ok: false, code: "CAPTCHA_INVALID", message: "Couldn't prepare the CAPTCHA capture." }); }
 
     return new Promise(resolve => {
         let settled = false;
@@ -916,7 +917,7 @@ function solveCaptcha(rawUrl: string, parent: BrowserWindow | null, signal?: Abo
             modal: Boolean(parent && !parent.isDestroyed()),
             show: false,
             autoHideMenuBar: true,
-            title: "Verificação de segurança Proton",
+            title: "Proton security check",
             backgroundColor: "#17171c",
             webPreferences: {
                 nodeIntegration: false,
@@ -942,7 +943,7 @@ function solveCaptcha(rawUrl: string, parent: BrowserWindow | null, signal?: Abo
             }
             invalidMessages++;
             if (invalidMessages >= 10)
-                finish({ ok: false, code: "CAPTCHA_INVALID", message: "O CAPTCHA retornou uma resposta inválida. Tente novamente." });
+                finish({ ok: false, code: "CAPTCHA_INVALID", message: "The CAPTCHA returned an invalid response. Try again." });
         };
         const finish = (result: CaptchaResult) => {
             if (settled) return;
@@ -954,8 +955,8 @@ function solveCaptcha(rawUrl: string, parent: BrowserWindow | null, signal?: Abo
             resolve(result);
             if (!captchaWindow.isDestroyed()) captchaWindow.destroy();
         };
-        const onAbort = () => finish({ ok: false, code: "CAPTCHA_CANCELLED", message: "Verificação cancelada. Nenhuma credencial foi alterada." });
-        const timeout = setTimeout(() => finish({ ok: false, code: "CAPTCHA_INVALID", message: "A verificação expirou. Inicie o login novamente." }), CAPTCHA_TIMEOUT_MS);
+        const onAbort = () => finish({ ok: false, code: "CAPTCHA_CANCELLED", message: "Check cancelled. No credentials were changed." });
+        const timeout = setTimeout(() => finish({ ok: false, code: "CAPTCHA_INVALID", message: "The check expired. Start signing in again." }), CAPTCHA_TIMEOUT_MS);
         timeout.unref?.();
 
         captchaSession.on("will-download", preventDownload);
@@ -969,24 +970,24 @@ function solveCaptcha(rawUrl: string, parent: BrowserWindow | null, signal?: Abo
         captchaWindow.webContents.on("will-redirect", guardNavigation);
         captchaWindow.webContents.on("did-fail-load", (_event, errorCode, _description, _validatedUrl, isMainFrame) => {
             if (isMainFrame && errorCode !== -3)
-                finish({ ok: false, code: "CAPTCHA_INVALID", message: "Não foi possível carregar o CAPTCHA oficial da Proton." });
+                finish({ ok: false, code: "CAPTCHA_INVALID", message: "Couldn't load Proton's official CAPTCHA." });
         });
         captchaWindow.webContents.on("preload-error", (_event, preloadPath) => {
             if (preloadPath === preload)
-                finish({ ok: false, code: "CAPTCHA_INVALID", message: "Não foi possível preparar a captura do CAPTCHA." });
+                finish({ ok: false, code: "CAPTCHA_INVALID", message: "Couldn't prepare the CAPTCHA capture." });
         });
         captchaWindow.once("ready-to-show", () => { if (!settled) captchaWindow.show(); });
         captchaWindow.once("close", () => {
-            if (!settled) finish({ ok: false, code: "CAPTCHA_CANCELLED", message: "Verificação cancelada. Nenhuma credencial foi alterada." });
+            if (!settled) finish({ ok: false, code: "CAPTCHA_CANCELLED", message: "Check cancelled. No credentials were changed." });
         });
         captchaWindow.once("closed", () => {
-            if (!settled) finish({ ok: false, code: "CAPTCHA_CANCELLED", message: "Verificação cancelada. Nenhuma credencial foi alterada." });
+            if (!settled) finish({ ok: false, code: "CAPTCHA_CANCELLED", message: "Check cancelled. No credentials were changed." });
         });
         ipcMain.on(CAPTCHA_IPC_CHANNEL, onCaptchaResponse);
         signal?.addEventListener("abort", onAbort, { once: true });
         if (signal?.aborted) onAbort();
         void captchaWindow.loadURL(challenge.url).catch(() => {
-            finish({ ok: false, code: "CAPTCHA_INVALID", message: "Não foi possível abrir o CAPTCHA oficial da Proton." });
+            finish({ ok: false, code: "CAPTCHA_INVALID", message: "Couldn't open Proton's official CAPTCHA." });
         });
     });
 }
@@ -999,12 +1000,45 @@ export function enableAutomatic(_: IpcMainInvokeEvent) {
     return runLogOperation("vpn-autostart", () => controller.enableAutomatic());
 }
 
+const GO_LIVE_PROBE_PARTITION = "golivebypass-probe";
+
+let goLiveInstance: GoLive | null = null;
+
+// Só existe no Windows x64, e a sessão do Electron só pode ser lida depois do `ready`.
+function goLive(): GoLive | null {
+    if (process.platform !== "win32" || process.arch !== "x64" || !app.isReady()) return null;
+    goLiveInstance ??= new GoLive({
+        session: session.defaultSession,
+        probeSession: session.fromPartition(GO_LIVE_PROBE_PARTITION),
+        tunnel: {
+            hasRoute: () => controller.hasGoLiveRoute(),
+            isBusy: () => controller.isRouteOperationRunning(),
+            currentServer: () => controller.goLiveServer(),
+            startFast: allowedIps => runLogOperation("vpn-activation", () => controller.fastStartGoLiveTunnel(allowedIps)),
+            start: allowedIps => runLogOperation("vpn-activation", () => controller.startGoLiveTunnel(allowedIps)),
+            stop: () => runLogOperation("vpn-shutdown", () => controller.stopGoLiveTunnel()),
+            rotate: avoid => runLogOperation("go-live-rotation", () => controller.rotateGoLiveRoute(avoid)),
+        },
+        log,
+    });
+    return goLiveInstance;
+}
+
+export function setGoLive(_: IpcMainInvokeEvent, enabled: unknown) {
+    return goLive()?.configure(enabled === true) ?? null;
+}
+
+export function checkGoLive(_: IpcMainInvokeEvent) {
+    return goLive()?.checkNow() ?? null;
+}
+
 export function shutdown(_: IpcMainInvokeEvent) {
     // Desativar o userplugin no Windows não reinicia o Discord para não interromper
     // chamadas em andamento. No Linux, contudo, um processo dentro de netns não consegue
     // voltar à rede host sem relaunch; portanto pedimos relaunch externo apenas no Linux.
     controller.cancelProtonLogin();
     disposeWireSockSnapshotWorker();
+    goLiveInstance?.dispose();
     return runLogOperation("vpn-shutdown", () => controller.shutdown(process.platform === "linux"));
 }
 
@@ -1026,6 +1060,7 @@ export function getVpnStatus(_: IpcMainInvokeEvent) {
     return controller.getStatusAsync().then(status => ({
         ...status,
         sessionStorage: proton.protonSessionStorageMode(),
+        goLive: goLive()?.status() ?? null,
     }));
 }
 
@@ -1242,15 +1277,15 @@ export async function submitBugReport(_: IpcMainInvokeEvent, value: unknown): Pr
 export function importWireGuardConfig(_: IpcMainInvokeEvent, sourcePath: unknown) {
     return typeof sourcePath === "string"
         ? controller.importCustomConfig(sourcePath)
-        : Promise.resolve({ success: false as const, error: "Informe o caminho de um arquivo WireGuard." });
+        : Promise.resolve({ success: false as const, error: "Enter the path of a WireGuard file." });
 }
 export async function selectWireGuardConfig(event: IpcMainInvokeEvent) {
     try {
         const parent = BrowserWindow.fromWebContents(event.sender);
         const options: OpenDialogOptions = {
-            title: "Selecionar configuração WireGuard",
+            title: "Select a WireGuard config",
             properties: ["openFile"],
-            filters: [{ name: "Configuração WireGuard", extensions: ["conf"] }],
+            filters: [{ name: "WireGuard config", extensions: ["conf"] }],
         };
         const selected = parent
             ? await dialog.showOpenDialog(parent, options)
@@ -1261,7 +1296,7 @@ export async function selectWireGuardConfig(event: IpcMainInvokeEvent) {
     } catch (error) {
         return {
             success: false as const,
-            error: `Não foi possível importar a configuração WireGuard: ${safeDiagnosticDetail(error, 300)}`,
+            error: `Couldn't import the WireGuard config: ${safeDiagnosticDetail(error, 300)}`,
         };
     }
 }
@@ -1306,7 +1341,7 @@ export function checkProtonSession(_: IpcMainInvokeEvent, username?: unknown) {
     return runLogOperation("proton-session-check", () => controller.checkProtonSession(value).catch(() => ({
         valid: false,
         code: "UNKNOWN" as const,
-        error: "Não foi possível verificar a sessão Proton.",
+        error: "Couldn't check the Proton session.",
     })));
 }
 
@@ -1323,11 +1358,10 @@ export async function logoutProton(_: IpcMainInvokeEvent) {
     });
 }
 
-
 export function optimizeProtonRoute(event: IpcMainInvokeEvent, value: unknown) {
     const options = cleanOptimizationOptions(value);
     if (pluginOptimizationStatus.active) {
-        return Promise.resolve({ success: false as const, error: "Já existe uma otimização Proton em andamento." });
+        return Promise.resolve({ success: false as const, error: "A Proton optimization is already running." });
     }
     const requestId = options.requestId || `plugin-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     options.requestId = requestId;
@@ -1433,7 +1467,7 @@ type PluginUpdateDownloadOptions = {
 function downloadBytes(url: string, maxBytes: number, redirects = 0, baseUrl?: string, options: PluginUpdateDownloadOptions = {}): Promise<Buffer> {
     const safeUrl = securePluginUpdateUrl(url, baseUrl);
     const deadlineAt = options.deadlineAt ?? Date.now() + PLUGIN_UPDATE_TIMEOUT_MS;
-    if (options.signal?.aborted) return Promise.reject(new Error("download do update cancelado"));
+    if (options.signal?.aborted) return Promise.reject(new Error("update download cancelled"));
     const remaining = deadlineAt - Date.now();
     if (remaining <= 0) return Promise.reject(new Error("update request timed out"));
 
@@ -1463,7 +1497,7 @@ function downloadBytes(url: string, maxBytes: number, redirects = 0, baseUrl?: s
             req?.destroy(error);
             rejectOnce(error);
         };
-        const onAbort = () => abortRequest("download do update cancelado");
+        const onAbort = () => abortRequest("update download cancelled");
 
         const deadlineTimer = setTimeout(() => abortRequest("update request timed out"), remaining);
         deadlineTimer.unref?.();
@@ -1478,7 +1512,7 @@ function downloadBytes(url: string, maxBytes: number, redirects = 0, baseUrl?: s
                 }
                 if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
                     response.resume();
-                    if (redirects >= PLUGIN_MAX_REDIRECTS) { rejectOnce(new Error("redirecionamentos demais no update")); return; }
+                    if (redirects >= PLUGIN_MAX_REDIRECTS) { rejectOnce(new Error("too many redirects on the update")); return; }
                     delegated = true;
                     cleanup();
                     try {
@@ -1493,7 +1527,7 @@ function downloadBytes(url: string, maxBytes: number, redirects = 0, baseUrl?: s
                 const contentLength = Number(response.headers["content-length"] ?? "");
                 if (Number.isFinite(contentLength) && contentLength > maxBytes) {
                     response.resume();
-                    rejectOnce(new Error("resposta do update grande demais"));
+                    rejectOnce(new Error("update response too large"));
                     return;
                 }
                 const chunks: Buffer[] = [];
@@ -1504,7 +1538,7 @@ function downloadBytes(url: string, maxBytes: number, redirects = 0, baseUrl?: s
                     size += chunk.length;
                     if (size > maxBytes) {
                         tooLarge = true;
-                        const error = new Error("resposta do update grande demais");
+                        const error = new Error("update response too large");
                         rejectOnce(error);
                         response.destroy(error);
                         return;
@@ -1537,7 +1571,7 @@ function isKnownPluginVersion(value: string): boolean {
 }
 
 function requireKnownPluginVersion(value: string): void {
-    if (!isKnownPluginVersion(value)) throw new Error("versão instalada do plugin desconhecida; atualização segura indisponível");
+    if (!isKnownPluginVersion(value)) throw new Error("installed plugin version unknown; safe update unavailable");
 }
 
 function pendingUpdatePath(): string {
@@ -1623,22 +1657,22 @@ function acquirePluginUpdateLock(): PluginUpdateLock {
 
             const owner = readUpdateLockOwner(path);
             if (owner && isProcessAlive(owner.pid))
-                throw new Error(`já existe uma atualização do plugin em outro processo (pid ${owner.pid})`);
+                throw new Error(`a plugin update is already running in another process (pid ${owner.pid})`);
 
             // Se o primeiro processo ainda está entre open("wx") e writeFile,
             // não remova o lock recém-criado. Uma segunda tentativa manual pode
             // recuperar um arquivo vazio antigo depois que o processo morreu.
             try {
                 const age = Date.now() - statSync(path).mtimeMs;
-                if (!owner && age < 2_000) throw new Error("outro processo está reservando o lock do updater");
+                if (!owner && age < 2_000) throw new Error("another process is reserving the updater lock");
             } catch (statError) {
                 if ((statError as { code?: string }).code === "ENOENT") continue;
-                if ((statError as Error).message === "outro processo está reservando o lock do updater") throw statError;
+                if ((statError as Error).message === "another process is reserving the updater lock") throw statError;
             }
             rmSync(path, { force: true });
         }
     }
-    throw new Error("não consegui reservar o lock do updater");
+    throw new Error("couldn't reserve the updater lock");
 }
 
 function releasePluginUpdateLock(lock: PluginUpdateLock | null | undefined): void {
@@ -1684,7 +1718,7 @@ function quarantinePendingUpdate(
             // Another renderer call may have quarantined the marker first.
             if (!existsSync(source)) return;
             if (attempt === 7)
-                throw new Error(`não consegui mover o marcador do updater para quarentena: ${safeDiagnosticDetail(error, 300)}`);
+                throw new Error(`couldn't quarantine the updater marker: ${safeDiagnosticDetail(error, 300)}`);
             continue;
         }
         if (options.removeBackup && options.projectRoot) {
@@ -1701,7 +1735,7 @@ function quarantinePendingUpdate(
         });
         return;
     }
-    throw new Error("não consegui reservar um nome seguro para quarentenar o marcador do updater");
+    throw new Error("couldn't reserve a safe name to quarantine the updater marker");
 }
 
 function policyFrom(value: unknown, fallback = pluginUpdatePolicy): PluginUpdatePolicy {
@@ -1727,7 +1761,7 @@ function setPluginUpdateLastError(policy: PluginUpdatePolicy, revision: number, 
 
 function assertCurrentPluginUpdatePolicy(policy: PluginUpdatePolicy, revision: number): void {
     if (revision !== pluginUpdatePolicyRevision || updatePolicyKey(pluginUpdatePolicy) !== updatePolicyKey(policy))
-        throw new Error("a política do updater mudou durante o download; atualização cancelada com segurança");
+        throw new Error("the updater policy changed during the download; the update was safely cancelled");
 }
 
 function clearPluginUpdateTimers(): void {
@@ -1797,21 +1831,21 @@ function writePendingUpdate(pending: TrustedPendingPluginUpdate): void {
 
 function safeBackupPath(projectRoot: string, backupName: string): string {
     if (!SAFE_BACKUP_NAME.test(backupName) || basename(backupName) !== backupName)
-        throw new Error("backup do update inválido");
+        throw new Error("invalid update backup");
     const backupRoot = resolve(projectRoot, BACKUP_DIR);
     const backupPath = resolve(backupRoot, backupName);
     if (!backupPath.startsWith(`${backupRoot}${process.platform === "win32" ? "\\" : "/"}`))
-        throw new Error("backup do update fora da pasta reservada");
+        throw new Error("update backup outside the reserved folder");
     return backupPath;
 }
 
 function safeDisplacedPath(projectRoot: string, displacedName: string): string {
     if (!SAFE_DISPLACED_NAME.test(displacedName) || basename(displacedName) !== displacedName)
-        throw new Error("nome temporário do rollback inválido");
+        throw new Error("invalid rollback temp name");
     const backupRoot = resolve(projectRoot, BACKUP_DIR);
     const displacedPath = resolve(backupRoot, displacedName);
     if (!displacedPath.startsWith(`${backupRoot}${process.platform === "win32" ? "\\" : "/"}`))
-        throw new Error("rollback fora da pasta reservada");
+        throw new Error("rollback outside the reserved folder");
     return displacedPath;
 }
 
@@ -1877,7 +1911,7 @@ async function applyStagedPluginUpdate(projectRoot: string, target: string, pend
         await rebuildUserplugin(projectRoot);
         const preparedSourceDigest = hashPluginSourceTree(target);
         if (pending.sourceDigest && preparedSourceDigest !== pending.sourceDigest)
-            throw new Error("a árvore preparada mudou durante a recompilação");
+            throw new Error("the prepared tree changed during the rebuild");
         writePendingUpdate({
             version: pending.version,
             channel: pending.channel,
@@ -1948,7 +1982,7 @@ async function recoverPendingUpdateInternal(options: { allowStaged?: boolean }):
     if (pending.phase === "staged") {
         // A prova do staging vem do próprio inspect (árvore dentro do staging com o
         // digest esperado); sem ela o journal é descartado no apply.
-        const trusted = inspectPendingUpdate().trusted;
+        const { trusted } = inspectPendingUpdate();
         if (trusted) await applyStagedPluginUpdate(projectRoot, target, trusted);
         return;
     }
@@ -1985,7 +2019,7 @@ async function recoverPendingUpdateInternal(options: { allowStaged?: boolean }):
             renameSync(displaced, target);
             await rebuildUserplugin(projectRoot);
         }
-        throw new Error("rollback interrompido sem backup estável recuperável");
+        throw new Error("rollback interrupted with no recoverable stable backup");
     }
 
     if (hasBackup) {
@@ -2000,14 +2034,14 @@ async function recoverPendingUpdateInternal(options: { allowStaged?: boolean }):
         return;
     }
 
-    if (!hasTarget) throw new Error("update interrompido sem fonte instalada nem backup recuperável");
+    if (!hasTarget) throw new Error("update interrupted with no installed source or recoverable backup");
 
     // Se o processo morreu antes do primeiro rename, o target ainda é o
     // checkout anterior e não há backup. Nesse caso basta remover a intenção.
     // Se o target já for a árvore nova e o backup tiver desaparecido, preserve o
     // marcador para diagnóstico em vez de declarar o update confirmado.
     if (pending.sourceDigest && hashPluginSourceTree(target) === pending.sourceDigest)
-        throw new Error("update interrompido deixou a árvore nova sem backup; recuperação manual necessária");
+        throw new Error("interrupted update left the new tree without a backup; manual recovery needed");
     readInstalledPluginVersion(target);
     rmSync(pendingUpdatePath(), { force: true });
     log("warn", "intenção de update interrompida descartada antes da troca", { versão: pending.version, canal: pending.channel });
@@ -2022,12 +2056,12 @@ interface PluginManifestData {
 
 function readManifest(target: string): PluginManifestData {
     const manifestPath = join(target, "manifest.json");
-    if (!existsSync(manifestPath)) throw new Error("manifest do plugin ausente");
+    if (!existsSync(manifestPath)) throw new Error("plugin manifest missing");
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as PluginManifestData;
-    if (!isCompatiblePluginManifest(manifest, PLUGIN_ASSET)) throw new Error("manifest do plugin não pertence ao updater oficial");
+    if (!isCompatiblePluginManifest(manifest, PLUGIN_ASSET)) throw new Error("plugin manifest doesn't belong to the official updater");
     if (manifest.platforms !== undefined) {
         if (!Array.isArray(manifest.platforms) || !manifest.platforms.every(p => typeof p === "string" && p.trim().length > 0)) {
-            throw new Error("manifest do plugin contém metadados de plataformas inválidos");
+            throw new Error("plugin manifest has invalid platform metadata");
         }
     }
     return manifest;
@@ -2077,14 +2111,14 @@ async function discardPendingBetaForStable(currentVersion = currentPluginVersion
     const { projectRoot, target } = userpluginSource();
     const backup = safeBackupPath(projectRoot, pending.backupName);
     if (!existsSync(backup)) {
-        throw new Error("backup do beta pendente não foi encontrado");
+        throw new Error("pending beta backup not found");
     }
 
     const currentManifest = readManifest(target);
     const installedManifestVersion = typeof currentManifest.version === "string" ? normalizePluginVersion(currentManifest.version) : null;
     if (installedManifestVersion !== pending.version) {
         log("warn", "ignorei rollback beta porque a fonte atual não corresponde ao marcador", { atual: installedManifestVersion ?? "inválida", pendente: pending.version });
-        throw new Error("a fonte atual não corresponde ao marcador beta pendente");
+        throw new Error("the current source doesn't match the pending beta marker");
     }
 
     const displacedName = `goLiveBypass-pending-${Date.now()}`;
@@ -2103,7 +2137,7 @@ async function discardPendingBetaForStable(currentVersion = currentPluginVersion
             // desse estado e tornava uma nova troca de canal irrecuperável.
             if (stableMoved && existsSync(target) && !existsSync(backup)) renameSync(target, backup);
             if (!existsSync(target) && existsSync(displaced)) renameSync(displaced, target);
-            if (!existsSync(target)) throw new Error("não consegui restaurar a fonte beta após falha do rollback");
+            if (!existsSync(target)) throw new Error("couldn't restore the beta source after the rollback failed");
             await rebuildUserplugin(projectRoot);
         } catch (rollbackError) {
             log("error", "falha ao restaurar o build anterior", { erro: rollbackError });
@@ -2120,7 +2154,7 @@ async function discardPendingBetaForStable(currentVersion = currentPluginVersion
 function releaseInfo(channel: PluginUpdateChannel, currentVersion: string, signal?: AbortSignal): Promise<PluginReleaseCandidate | null> {
     return downloadText(GITHUB_RELEASES_URL, PLUGIN_API_MAX_BYTES, 0, undefined, { signal }).then(raw => {
         const releases = JSON.parse(raw) as unknown;
-        if (!Array.isArray(releases)) throw new Error("resposta de releases inválida");
+        if (!Array.isArray(releases)) throw new Error("invalid releases response");
         const candidates: PluginReleaseCandidate[] = [];
         for (const value of releases) {
             if (value === null || typeof value !== "object") continue;
@@ -2137,7 +2171,7 @@ function releaseInfo(channel: PluginUpdateChannel, currentVersion: string, signa
             const prerelease = release.prerelease === true;
             candidates.push({ tag: release.tag_name, version, zipUrl, shaUrl, prerelease });
         }
-        if (candidates.length === 0 && channel === "stable") throw new Error("nenhum release estável disponível");
+        if (candidates.length === 0 && channel === "stable") throw new Error("no stable release available");
         return choosePluginRelease(candidates, currentVersion, channel);
     });
 }
@@ -2156,10 +2190,10 @@ async function validateArchiveEntries(archive: string, extracted: string): Promi
     for (const entry of listing.split(/\r?\n/).map(value => value.trim()).filter(Boolean)) {
         const normalized = entry.replaceAll("\\", "/");
         if (normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized) || normalized.split("/").includes(".."))
-            throw new Error("archive do plugin contém caminho inseguro");
+            throw new Error("plugin archive has an unsafe path");
         const candidate = resolve(root, normalized);
         if (candidate !== root && !candidate.startsWith(`${root}${process.platform === "win32" ? "\\" : "/"}`))
-            throw new Error("archive do plugin escapa da pasta temporária");
+            throw new Error("plugin archive escapes the temp folder");
     }
 }
 
@@ -2170,10 +2204,10 @@ function validateExtractedTree(root: string): void {
         const current = pending.pop()!;
         for (const entry of readdirSync(current, { withFileTypes: true })) {
             const candidate = join(current, entry.name);
-            if (entry.isSymbolicLink()) throw new Error("archive do plugin contém link simbólico");
+            if (entry.isSymbolicLink()) throw new Error("plugin archive has a symbolic link");
             const resolved = realpathSync(candidate);
             if (resolved !== resolvedRoot && !resolved.startsWith(`${resolvedRoot}${process.platform === "win32" ? "\\" : "/"}`))
-                throw new Error("archive do plugin escapa da pasta temporária");
+                throw new Error("plugin archive escapes the temp folder");
             if (entry.isDirectory()) pending.push(candidate);
         }
     }
@@ -2182,20 +2216,20 @@ function validateExtractedTree(root: string): void {
 function validatePluginSourceTree(root: string, platform: NodeJS.Platform = process.platform, arch: string = process.arch): void {
     let rootStats: Stats;
     try { rootStats = lstatSync(root); }
-    catch { throw new Error("fonte do plugin ausente"); }
-    if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) throw new Error("fonte do plugin não é uma pasta regular");
+    catch { throw new Error("plugin source missing"); }
+    if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) throw new Error("plugin source isn't a regular folder");
 
     const pending = [root];
     while (pending.length > 0) {
         const current = pending.pop()!;
         for (const entry of readdirSync(current, { withFileTypes: true })) {
             const candidate = join(current, entry.name);
-            if (entry.isSymbolicLink()) throw new Error("fonte do plugin contém link simbólico");
+            if (entry.isSymbolicLink()) throw new Error("plugin source has a symbolic link");
             if (entry.isDirectory()) {
                 pending.push(candidate);
                 continue;
             }
-            if (!entry.isFile()) throw new Error("fonte do plugin contém entrada especial");
+            if (!entry.isFile()) throw new Error("plugin source has a special entry");
         }
     }
 
@@ -2204,7 +2238,7 @@ function validatePluginSourceTree(root: string, platform: NodeJS.Platform = proc
         const normalizedPlatforms = manifest.platforms.map(p => String(p).trim().toLowerCase());
         const current = platform === "win32" ? ["win32", "windows"] : [platform];
         if (!current.some(p => normalizedPlatforms.includes(p))) {
-            throw new Error(`o pacote do plugin não suporta a plataforma atual (${platform})`);
+            throw new Error(`the plugin package doesn't support this platform (${platform})`);
         }
     }
 
@@ -2212,8 +2246,8 @@ function validatePluginSourceTree(root: string, platform: NodeJS.Platform = proc
         const candidate = join(root, relative);
         let stats: Stats;
         try { stats = lstatSync(candidate); }
-        catch { throw new Error(`archive do plugin não contém ${relative}`); }
-        if (stats.isSymbolicLink() || !stats.isFile() || stats.size <= 0) throw new Error(`archive do plugin contém ${relative} inválido`);
+        catch { throw new Error(`plugin archive is missing ${relative}`); }
+        if (stats.isSymbolicLink() || !stats.isFile() || stats.size <= 0) throw new Error(`plugin archive has an invalid ${relative}`);
     }
 }
 
@@ -2228,13 +2262,13 @@ function hashPluginSourceTree(root: string): string {
         for (const entry of entries) {
             const candidate = join(current, entry.name);
             const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
-            if (entry.isSymbolicLink()) throw new Error("fonte do plugin contém link simbólico");
+            if (entry.isSymbolicLink()) throw new Error("plugin source has a symbolic link");
             if (entry.isDirectory()) {
                 digest.update(`directory:${relative}\0`);
                 visit(candidate, relative);
                 continue;
             }
-            if (!entry.isFile()) throw new Error("fonte do plugin contém entrada especial");
+            if (!entry.isFile()) throw new Error("plugin source has a special entry");
             const content = readFileSync(candidate);
             digest.update(`file:${relative}:${content.length}\0`);
             digest.update(content);
@@ -2264,7 +2298,7 @@ function inspectPendingUpdate(): PendingUpdateInspection {
                 return {
                     pending,
                     trusted: null,
-                    error: `update baixado não tem mais a fonte em staging e não consegui liberar nova preparação: ${safeDiagnosticDetail(error, 300)}`,
+                    error: `the downloaded update lost its staged source and a new preparation couldn't be cleared: ${safeDiagnosticDetail(error, 300)}`,
                 };
             }
         }
@@ -2275,7 +2309,7 @@ function inspectPendingUpdate(): PendingUpdateInspection {
         return {
             pending,
             trusted: null,
-            error: "há um update interrompido aguardando recuperação do checkout",
+            error: "an interrupted update is waiting for checkout recovery",
         };
     }
 
@@ -2288,7 +2322,7 @@ function inspectPendingUpdate(): PendingUpdateInspection {
             return {
                 pending,
                 trusted: null,
-                error: `marcador de update pendente legado sem prova da árvore preparada; não consegui liberar nova preparação: ${safeDiagnosticDetail(error, 300)}`,
+                error: `legacy pending-update marker has no proof of the prepared tree; a new preparation couldn't be cleared: ${safeDiagnosticDetail(error, 300)}`,
             };
         }
     }
@@ -2306,7 +2340,7 @@ function inspectPendingUpdate(): PendingUpdateInspection {
                 return {
                     pending,
                     trusted: null,
-                    error: `digest da árvore preparada não confere com a fonte atual e não consegui liberar nova preparação: ${safeDiagnosticDetail(error, 300)}`,
+                    error: `prepared tree digest doesn't match the current source and a new preparation couldn't be cleared: ${safeDiagnosticDetail(error, 300)}`,
                 };
             }
         }
@@ -2314,7 +2348,7 @@ function inspectPendingUpdate(): PendingUpdateInspection {
         return {
             pending,
             trusted: null,
-            error: `não consegui validar a árvore preparada${error ? `: ${safeDiagnosticDetail(error, 300)}` : ""}`,
+            error: `couldn't validate the prepared tree${error ? `: ${safeDiagnosticDetail(error, 300)}` : ""}`,
         };
     }
 
@@ -2348,10 +2382,10 @@ async function extractAndValidatePlugin(zip: Buffer, release: PluginReleaseCandi
         const sourceResolved = resolve(source);
         const rootResolved = resolve(extracted);
         if (!sourceResolved.startsWith(`${rootResolved}${process.platform === "win32" ? "\\" : "/"}`))
-            throw new Error("fonte extraída fora da pasta temporária");
+            throw new Error("extracted source outside the temp folder");
         const manifest = readManifest(source);
         if (typeof manifest.version !== "string" || normalizePluginVersion(manifest.version) !== release.version)
-            throw new Error("manifest do plugin não corresponde ao release");
+            throw new Error("plugin manifest doesn't match the release");
         validatePluginSourceTree(source);
         return { work, source, sourceDigest: hashPluginSourceTree(source) };
     } catch (error) {
@@ -2468,9 +2502,9 @@ async function performPluginUpdateLocked(policy: PluginUpdatePolicy, revision: n
         throw error;
     }
     const expected = /^([a-f0-9]{64})\b/i.exec(checksumText)?.[1]?.toLowerCase();
-    if (!expected) throw new Error("release sem SHA-256 válido");
+    if (!expected) throw new Error("release has no valid SHA-256");
     const digest = createHash("sha256").update(zip).digest("hex");
-    if (digest !== expected) throw new Error("SHA-256 do plugin não confere");
+    if (digest !== expected) throw new Error("plugin SHA-256 doesn't match");
 
     // O staging fica no mesmo volume do checkout para que a troca final use
     // rename atômico também em instalações Windows com TEMP em outro disco.
@@ -2483,11 +2517,11 @@ async function performPluginUpdateLocked(policy: PluginUpdatePolicy, revision: n
         const { projectRoot, target } = userpluginSource();
         const sourceAtCommit = { projectRoot, target };
         if (sourceAtCommit.projectRoot !== sourceAtStart.projectRoot || sourceAtCommit.target !== sourceAtStart.target)
-            throw new Error("a origem local do plugin mudou durante o download");
+            throw new Error("the plugin's local origin changed during the download");
         if (readInstalledPluginVersion(sourceAtCommit.target) !== currentVersion)
-            throw new Error("a versão local do plugin mudou durante o download");
+            throw new Error("the plugin's local version changed during the download");
         if (hashPluginSourceTree(sourceAtCommit.target) !== sourceDigestAtStart)
-            throw new Error("o conteúdo local do plugin mudou durante o download");
+            throw new Error("the plugin's local content changed during the download");
         const backupRoot = join(projectRoot, BACKUP_DIR);
         mkdirSync(backupRoot, { recursive: true });
         const backupName = `${USERPLUGIN_DIR}-${Date.now()}`;
@@ -2552,7 +2586,7 @@ function runPluginUpdate(policy: PluginUpdatePolicy, revision = pluginUpdatePoli
             current: pluginRuntimeVersion,
             channel: policy.channel,
             ...trustedPendingResultState(),
-            error: "já existe uma atualização do outro canal em andamento",
+            error: "an update from the other channel is already running",
         });
     }
     const controller = new AbortController();
@@ -2690,7 +2724,7 @@ function readInstalledPluginVersion(target: string): string {
     const manifest = readManifest(target);
     validatePluginSourceTree(target);
     const version = typeof manifest.version === "string" ? normalizePluginVersion(manifest.version) : null;
-    if (!version) throw new Error("manifest instalado do plugin sem versão válida");
+    if (!version) throw new Error("installed plugin manifest has no valid version");
     return version;
 }
 
@@ -2740,7 +2774,7 @@ function userpluginSource(allowMissingTarget = false) {
         }
     }
 
-    throw new Error("não foi possível localizar o checkout Vencord/Equicord com segurança");
+    throw new Error("couldn't safely find the Vencord/Equicord checkout");
 }
 
 function resolveWindowsPnpm(): string {
@@ -2806,17 +2840,13 @@ async function rebuildUserplugin(projectRoot: string): Promise<void> {
     } catch (error) {
         const failure = error as { capturedStderr?: string; capturedStdout?: string; message?: string };
         const detail = [failure.message, failure.capturedStderr, failure.capturedStdout].filter(Boolean).map(value => String(value).trim()).join("\n").slice(-1200);
-        throw new Error(`não consegui recompilar o plugin${detail ? `: ${detail}` : ""}`);
+        throw new Error(`couldn't rebuild the plugin${detail ? `: ${detail}` : ""}`);
     }
 }
 
 app.on("before-quit", event => {
     if (controller.isRelaunching() || quitting) return;
     controller.cancelProtonLogin();
-    if (controller.shouldKeepTunnelOnQuit()) {
-        log("info", "Discord fechado com o bypass ligado; o túnel continua até o usuário desligar");
-        return;
-    }
     if (!controller.hasCleanupWork()) return;
     event.preventDefault();
     quitting = true;
@@ -2853,28 +2883,12 @@ app.on("will-quit", () => {
     disposeWireSockSnapshotWorker();
 });
 
-// Com o túnel persistente, uma rota morta pode impedir o Discord de carregar a interface, que é
-// onde fica o botão de desligar. O diálogo nativo não depende dela. Nunca desliga sozinho: sem
-// internet nenhuma o resultado seria igual, e a parada ainda pede permissão do Windows.
-async function offerToStopDeadTunnel(): Promise<void> {
-    if (await controller.tunnelResponds()) return;
-    log("warn", "túnel ativo não respondeu ao abrir o Discord");
-    const { response } = await dialog.showMessageBox({
-        type: "warning",
-        title: "GoLiveBypass",
-        message: "The bypass tunnel isn't responding",
-        detail: "Discord may not connect while it's on. Turn it off to use your normal connection, or keep it on if your internet is down.",
-        buttons: ["Turn off bypass", "Keep it on"],
-        defaultId: 0,
-        cancelId: 1,
-    });
-    if (response !== 0) return;
-    const result = await runLogOperation("vpn-shutdown", () => controller.shutdown(false));
-    if (!result.success) log("error", "não consegui desligar o túnel que não respondeu", { state: result.state, erro: result.error });
-}
-
 app.whenReady().then(async () => {
     log("info", `abrindo plugin VPN | ${process.platform} ${process.arch} | electron ${process.versions.electron}`);
+    // Vem antes de tudo que demora: o gateway não pode conectar antes do túnel.
+    const goLiveAtBoot = shouldStartAtBoot(pluginSettings()) ? goLive() : null;
+    await goLiveAtBoot?.holdGateway();
+    await goLiveAtBoot?.startFast().catch(error => log("warn", "caminho rápido do Go Live falhou", { erro: safeDiagnosticDetail(error, 300) }));
     try {
         const lock = acquirePluginUpdateLock();
         try { await recoverInterruptedPluginUpdate({ allowStaged: true }); }
@@ -2887,7 +2901,9 @@ app.whenReady().then(async () => {
     // antigo e aguarde o reload explícito.
     pluginRuntimeVersion = currentPluginVersion();
     await controller.initialize();
-    void offerToStopDeadTunnel().catch(error => log("error", "falha ao verificar o túnel na abertura", { erro: error }));
+    // Um túnel que sobrou pode não ter o filtro, então nunca é adotado.
+    await controller.stopLeftoverTunnel()?.catch(error => log("error", "falha ao desligar o túnel que sobrou", { erro: error }));
+    if (goLiveAtBoot) void goLiveAtBoot.configure(true).catch(error => log("error", "falha ao ligar o Go Live", { erro: safeDiagnosticDetail(error, 300) }));
     if (pluginEnabled() && pluginSettings().onboardingCompleted === true) {
         if (controller.shouldSkipAutomaticEnable()) {
             log("warn", "VPN não foi ativada automaticamente após relaunch não confirmado");
