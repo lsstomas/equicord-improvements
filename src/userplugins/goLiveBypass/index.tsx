@@ -146,7 +146,7 @@ const GatewayConnectionStore: { isConnected(): boolean; } = findStoreLazy("Gatew
 
 const VIDEO_GUARD = "2026-08-video-guard";
 
-const PLUGIN_VERSION = "2.0.13";
+const PLUGIN_VERSION = "2.0.13-improvements.1";
 const PLUGIN_UPDATE_STATUS_POLL_INTERVAL_MS = 15_000;
 const PLUGIN_UPDATE_STATUS_TIMEOUT_MS = 10_000;
 const PLUGIN_UPDATE_CHECK_TIMEOUT_MS = 2 * 60_000 + 15_000;
@@ -1774,6 +1774,7 @@ function AboutPlugin() {
         <section>
             <Paragraph>Turn the bypass on or off and check its status from the panel. You can also open it from the shield icon at the top of Discord.</Paragraph>
             <Button onClick={openControlPanel}>Open panel</Button>
+            <Button onClick={openPluginOnboarding}>Run setup</Button>
             <Paragraph>
                 Made by bezumiya. Code and issues on <MaskedLink href="https://github.com/bezumiya/GoLiveBypass">GitHub</MaskedLink>.
             </Paragraph>
@@ -2532,6 +2533,10 @@ function ControlPanelHost({ modalProps }: { modalProps: RenderModalProps; }) {
             unavailable={!Native}
             regions={<><div className="vc-glb-field"><span>Voice region</span><VoiceRegionPicker /></div><div className="vc-glb-field"><span>Go Live region</span><StreamRegionPicker /></div></>}
             updates={<PluginUpdateSettings />}
+            runSetup={() => {
+                modalProps.onClose();
+                openPluginOnboarding();
+            }}
         />
     );
 }
@@ -3094,6 +3099,7 @@ export default definePlugin({
     },
     toolboxActions: {
         "Open GoLiveBypass panel": openControlPanel,
+        "Run GoLiveBypass setup": openPluginOnboarding,
         "Report a GoLiveBypass bug": openBugReport,
     },
 

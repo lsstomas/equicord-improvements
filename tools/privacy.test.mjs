@@ -26,6 +26,11 @@ assert.deepEqual(clean, {
 assert.ok(!JSON.stringify(clean).includes(ID));
 assert.equal(Object.keys(clean.plugins)[0], "Toast", "A stable order keeps Git diffs clean");
 
+assert.deepEqual(sanitizeSettings({ plugins: { GoLiveBypass: {
+    enabled: true, autoUpdate: false, protonFreeOnly: true,
+    goLive: true, gatewayProxy: true, onboardingCompleted: true, onboardingSkipped: true,
+} } }).plugins.GoLiveBypass, { enabled: true, autoUpdate: false, protonFreeOnly: true }, "Installing public options preserves the new user's own setup and tunnel choice");
+
 const root = mkdtempSync(join(tmpdir(), "repo-"));
 mkdirSync(join(root, "src"));
 mkdirSync(join(root, "settings"));

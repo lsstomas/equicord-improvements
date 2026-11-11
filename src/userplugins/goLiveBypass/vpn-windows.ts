@@ -193,10 +193,8 @@ function serviceRunningFromSc(name: string): boolean | null {
         const output = execFileSync("sc.exe", ["query", name], {
             encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 5000,
         });
-        if (/STATE\s*:\s*\d+\s+RUNNING/i.test(output)) return true;
-        if (/STATE\s*:\s*\d+\s+STOPPED/i.test(output)) return false;
-        if (/STATE\s*:\s*\d+\s+(?:START_PENDING|STOP_PENDING|PAUSED|PAUSE_PENDING|CONTINUE_PENDING)/i.test(output)) return null;
-        return null;
+        const state = parseScServiceState(output);
+        return state === 4 ? true : state === 1 ? false : null;
     } catch (error) {
         return Number((error as { status?: unknown })?.status) === 1060 ? false : null;
     }
@@ -958,8 +956,8 @@ exit $child.ExitCode`;
 async function startServiceWithoutElevation(configPath: string): Promise<boolean> {
     const name = "wiresock-client-service";
     try {
-        const config = execFileSync("sc.exe", ["qc", name], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 5000 });
-        if (!/DEMAND_START/.test(config) || !config.toLowerCase().includes(configPath.toLowerCase())) return false;
+        const config = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", SERVICE_CONFIG_SCRIPT], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 5000 });
+        if (!serviceConfigMatches(config, configPath)) return false;
         execFileSync("sc.exe", ["start", name], { stdio: "ignore", windowsHide: true, timeout: 10_000 });
     } catch {
         return false;
@@ -968,7 +966,7 @@ async function startServiceWithoutElevation(configPath: string): Promise<boolean
         await wait(250);
         try {
             const state = execFileSync("sc.exe", ["query", name], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 5000 });
-            if (/STATE\s*:\s*4\b/.test(state)) return true;
+            if (parseScServiceState(state) === 4) return true;
         } catch {
             return false;
         }
@@ -1001,19 +999,37 @@ export interface FastStartSamples {
     processes: CommandSample;
 }
 
-const SERVICE_STOPPED = /STATE\s*:\s*1\b/;
 const SERVICE_NOT_INSTALLED = 1060;
-const SERVICE_STOP_PENDING = /STATE\s*:\s*3\b/;
 const STOP_WAIT_ATTEMPTS = 15;
 const STOP_WAIT_DELAY_MS = 200;
+const SERVICE_CONFIG_SCRIPT = "$ErrorActionPreference='Stop'; Get-CimInstance Win32_Service -Filter \"Name='wiresock-client-service'\" | Select-Object StartMode,PathName | ConvertTo-Json -Compress";
+
+export function parseScServiceState(output: string): number | null {
+    const match = /^\s*[^:\r\n]+:\s*([1-7])\s+(STOPPED|START_PENDING|STOP_PENDING|RUNNING|CONTINUE_PENDING|PAUSE_PENDING|PAUSED)\s*$/im.exec(output);
+    if (!match) return null;
+    const states = ["STOPPED", "START_PENDING", "STOP_PENDING", "RUNNING", "CONTINUE_PENDING", "PAUSE_PENDING", "PAUSED"];
+    const state = Number(match[1]);
+    return states[state - 1] === match[2].toUpperCase() ? state : null;
+}
+
+function serviceConfigMatches(output: string, configPath: string): boolean {
+    try {
+        const config: unknown = JSON.parse(output);
+        return config !== null && typeof config === "object"
+            && "StartMode" in config && config.StartMode === "Manual"
+            && "PathName" in config && typeof config.PathName === "string"
+            && configArgumentEquals(config.PathName, configPath);
+    } catch {
+        return false;
+    }
+}
 
 // Tudo aqui precisa estar como um fechamento limpo deixa. Qualquer dúvida devolve false, e o
 // caminho normal, que sabe recuperar e adotar, assume.
 export function fastStartAllowed({ configPath, service, serviceConfig, proService, processes }: FastStartSamples): boolean {
-    if (service.code !== 0 || !SERVICE_STOPPED.test(service.stdout)) return false;
-    const binaryPath = /BINARY_PATH_NAME\s*:\s*(.+)/.exec(serviceConfig.stdout)?.[1] ?? null;
-    if (serviceConfig.code !== 0 || !/DEMAND_START/.test(serviceConfig.stdout) || !configArgumentEquals(binaryPath, configPath)) return false;
-    if (proService.code !== SERVICE_NOT_INSTALLED && !(proService.code === 0 && SERVICE_STOPPED.test(proService.stdout))) return false;
+    if (service.code !== 0 || parseScServiceState(service.stdout) !== 1) return false;
+    if (serviceConfig.code !== 0 || !serviceConfigMatches(serviceConfig.stdout, configPath)) return false;
+    if (proService.code !== SERVICE_NOT_INSTALLED && !(proService.code === 0 && parseScServiceState(proService.stdout) === 1)) return false;
     return processes.code === 0 && !processes.stdout.toLowerCase().includes("wiresock-client.exe");
 }
 
@@ -1028,15 +1044,42 @@ function sampleCommand(file: string, args: string[]): Promise<CommandSample> {
 
 // O fechamento rápido não espera o serviço parar, e reabrir logo depois pode alcançá-lo no meio disso.
 export function wireSockStillStopping({ service, processes }: Pick<FastStartSamples, "service" | "processes">): boolean {
-    if (SERVICE_STOP_PENDING.test(service.stdout)) return true;
-    return SERVICE_STOPPED.test(service.stdout) && processes.stdout.toLowerCase().includes("wiresock-client.exe");
+    if (service.code !== 0) return false;
+    const state = parseScServiceState(service.stdout);
+    if (state === 3) return true;
+    return state === 1 && processes.stdout.toLowerCase().includes("wiresock-client.exe");
+}
+
+export async function waitServicesStopped(names: string[], {
+    timeoutMs = 15_000,
+    query = (name: string) => sampleCommand("sc.exe", ["query", name]),
+    sleep = wait,
+    now = Date.now,
+}: {
+    timeoutMs?: number;
+    query?: (name: string) => Promise<CommandSample>;
+    sleep?: (ms: number) => Promise<void>;
+    now?: () => number;
+} = {}): Promise<boolean> {
+    const deadline = now() + timeoutMs;
+    let pending = names;
+    while (pending.length > 0) {
+        const samples = await Promise.all(pending.map(name => query(name)));
+        if (samples.some(sample => sample.code !== 0 && sample.code !== SERVICE_NOT_INSTALLED)) return false;
+        pending = pending.filter((_, index) => samples[index].code !== SERVICE_NOT_INSTALLED && parseScServiceState(samples[index].stdout) !== 1);
+        if (pending.length === 0) return true;
+        const remaining = deadline - now();
+        if (remaining <= 0) return false;
+        await sleep(Math.min(250, remaining));
+    }
+    return true;
 }
 
 async function sampleFastStart(configPath: string): Promise<FastStartSamples> {
     const [mainService, proService] = VPN_SERVICE_NAMES;
     const [service, serviceConfig, pro, processes] = await Promise.all([
         sampleCommand("sc.exe", ["query", mainService]),
-        sampleCommand("sc.exe", ["qc", mainService]),
+        sampleCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", SERVICE_CONFIG_SCRIPT]),
         sampleCommand("sc.exe", ["query", proService]),
         sampleCommand("tasklist", ["/FI", "IMAGENAME eq wiresock-client.exe", "/NH"]),
     ]);
@@ -1076,7 +1119,8 @@ export async function fastStartWireSock(configPath: string, rawConfig: string, a
     const [mainService] = VPN_SERVICE_NAMES;
     if ((await sampleCommand("sc.exe", ["start", mainService])).code !== 0) return false;
     for (let attempt = 0; attempt < 30; attempt++) {
-        if (/STATE\s*:\s*4\b/.test((await sampleCommand("sc.exe", ["query", mainService])).stdout)) return true;
+        const sample = await sampleCommand("sc.exe", ["query", mainService]);
+        if (sample.code === 0 && parseScServiceState(sample.stdout) === 4) return true;
         await wait(100);
     }
     return false;
@@ -1224,6 +1268,8 @@ export async function stopOwnedWireSock(
         }
     }
     if (manual && initial.processIds.length) killProcesses(initial.processIds, "da restauração manual", log);
+    else if (!await waitServicesStopped(initial.services))
+        log("warn", "WireSock service stop was not confirmed within the grace period; inspecting remaining owned processes");
     for (let attempt = 0; attempt < 2; attempt++) {
         await wait(500);
         const current = await inspectWireSockUntilReliable(configPath);

@@ -1,0 +1,126 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+.vc-voice-finder-header-actions {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+    gap: 4px;
+    margin-inline-start: auto;
+}
+
+.vc-voice-finder-active {
+    color: var(--text-link, #a8a6ff);
+}
+
+.vc-voice-finder-panel {
+    display: grid;
+    gap: 12px;
+    box-sizing: border-box;
+    width: min(332px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    overflow: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thin-thumb, #696a73) transparent;
+    padding: 12px 14px;
+    border: 1px solid var(--border-subtle, #393a41);
+    border-radius: var(--radius-md, 8px);
+    background: var(--background-surface-high, var(--background-floating, #242429));
+    color: var(--text-default, var(--header-primary, #f2f3f5));
+    box-shadow: var(--shadow-high, 0 8px 24px #0004);
+    font-family: var(--font-primary);
+    font-size: 14px;
+}
+
+.vc-voice-finder-heading,
+.vc-voice-finder-footer,
+.vc-voice-finder-toggle,
+.vc-voice-finder-options {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.vc-voice-finder-heading,
+.vc-voice-finder-toggle {
+    justify-content: space-between;
+}
+
+.vc-voice-finder-heading h3 {
+    color: var(--text-strong, var(--header-primary, #f2f3f5));
+}
+
+.vc-voice-finder-field,
+.vc-voice-finder-toggles {
+    display: grid;
+    min-width: 0;
+    gap: 6px;
+}
+
+.vc-voice-finder-field > :is(label, span) {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.vc-voice-finder-options,
+.vc-voice-finder-footer {
+    flex-wrap: wrap;
+}
+
+.vc-voice-finder-options > button {
+    flex: 1 0 auto;
+    min-height: 28px;
+}
+
+.vc-voice-finder-range {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.vc-voice-finder-toggle {
+    min-height: 28px;
+}
+
+.vc-voice-finder-toggle > label:first-child {
+    flex: 1;
+    cursor: pointer;
+}
+
+.vc-voice-finder-footer {
+    padding-top: 10px;
+    border-top: 1px solid var(--border-subtle, #393a41);
+    font-size: 12px;
+}
+
+.vc-voice-finder-footer > [role="status"] {
+    margin-inline-end: auto;
+    color: var(--text-muted, #b4b6bf);
+}
+
+.vc-voice-finder-error {
+    color: var(--text-feedback-critical, #ff878b);
+    font-size: 12px;
+}
+
+[data-vc-voice-finder-row="match"],
+[data-vc-voice-finder-row="person-match"] {
+    --vc-voice-finder-highlight: var(--text-link, #a8a6ff);
+
+    background: color-mix(in srgb, var(--vc-voice-finder-highlight) 22%, transparent);
+    border-radius: var(--radius-sm, 6px);
+    box-shadow: inset 4px 0 var(--vc-voice-finder-highlight);
+}
+
+[data-vc-voice-finder-row="person-match"] {
+    background: color-mix(in srgb, var(--vc-voice-finder-highlight) 32%, transparent);
+    outline: 2px solid var(--vc-voice-finder-highlight);
+    outline-offset: -2px;
+}
+
+[data-vc-voice-finder-row="dimmed"]:not(:hover, :focus-within) {
+    opacity: .45;
+}

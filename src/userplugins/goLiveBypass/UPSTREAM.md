@@ -3,6 +3,7 @@ Based on https://github.com/bezumiya/GoLiveBypass at v2.0.13 (GPL-3.0).
 `bin/win32-x64/proton-confgen.exe` isn't stored here. `install.mjs` downloads it from that release and checks its SHA-256.
 
 Local changes:
+- Local revision `2.0.13-improvements.1` adds service detection independent of Windows display language, a grace period for service shutdown, longer startup probing, probe diagnostics and shortcuts to reopen setup.
 - Adds a control panel with a status icon in Discord's top bar.
 - Shows the bypass state, a single main button and a status check.
 - Moves routes, account and advanced options into tabs, and leaves a shortcut in the plugin settings.

@@ -21,8 +21,11 @@ Instructions for an AI agent installing these plugins for a user.
 ## Verify
 
 - `node_modules/.bin/tsc --noEmit` passes in the Equicord folder.
-- All five tests pass: `node scripts/testVoiceChannelHistory.mjs`, `testUserplugins.mjs`, `testActivityTracker.mjs`, `testToastVoiceTracking.mjs` and `testGoLive.mjs`.
+- All six tests pass: `node scripts/testVoiceChannelHistory.mjs`, `testUserplugins.mjs`, `testActivityTracker.mjs`, `testToastVoiceTracking.mjs`, `testGoLive.mjs` and `testDiscordCompatibility.mjs`.
 - The radar icon appears in Discord's top bar and opens the dashboard.
+- VoiceChannelFinder highlights matching channels in the server's sidebar. Empty with Hide non-matching voice channels removes occupied voice channels.
+- After a complete restart, Discord's mute, deafen and call join/leave sound effects play normally.
+- On Windows, GoLiveBypass recognizes the WireSock service on localized systems. Run setup is available after Set up later, including in the panel's Advanced tab.
 
 ## If something fails
 

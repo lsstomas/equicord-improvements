@@ -461,7 +461,7 @@ function ToggleRow({ label, checked, onChange, disabled }: { label: string; chec
     );
 }
 
-function AdvancedTab({ controller, regions, updates }: { controller: ControlPanelController; regions: ReactNode; updates: ReactNode; }) {
+function AdvancedTab({ controller, regions, updates, runSetup }: { controller: ControlPanelController; regions: ReactNode; updates: ReactNode; runSetup(): void; }) {
     const { customMode, protonCountry, protonFreeOnly, protonAutoPing, busy, optimizing, applyingServer, status } = controller;
     const locked = busy || optimizing || applyingServer !== null;
     const modeLocked = Boolean(status?.active) || locked;
@@ -500,6 +500,7 @@ function AdvancedTab({ controller, regions, updates }: { controller: ControlPane
                 <h4>Troubleshooting</h4>
                 <p className="vc-glb-hint">Use Restore network if the tunnel won't turn off or Discord stops connecting.</p>
                 <div className="vc-glb-row">
+                    <Button variant="secondary" size="small" onClick={runSetup} disabled={locked}>Run setup</Button>
                     <Button variant="dangerSecondary" size="small" onClick={controller.restoreNetwork} disabled={locked}>Restore network</Button>
                     <Button variant="secondary" size="small" onClick={controller.copyDiagnostic}>Copy diagnostics</Button>
                     <Button variant="secondary" size="small" onClick={controller.reportBug}>Report a bug</Button>
@@ -515,12 +516,13 @@ const TABS: { id: PanelTab; label: string; }[] = [
     { id: "advanced", label: "Advanced" },
 ];
 
-export function ControlPanel({ modalProps, controller, regions, updates, unavailable }: {
+export function ControlPanel({ modalProps, controller, regions, updates, unavailable, runSetup }: {
     modalProps: RenderModalProps;
     controller: ControlPanelController;
     regions: ReactNode;
     updates: ReactNode;
     unavailable: boolean;
+    runSetup(): void;
 }) {
     const [tab, setTab] = useState<PanelTab>("route");
 
@@ -546,7 +548,7 @@ export function ControlPanel({ modalProps, controller, regions, updates, unavail
                     <div role="tabpanel" className="vc-glb-tabpanel">
                         {tab === "route" && <RouteTab controller={controller} openTab={setTab} />}
                         {tab === "account" && <AccountTab controller={controller} />}
-                        {tab === "advanced" && <AdvancedTab controller={controller} regions={regions} updates={updates} />}
+                        {tab === "advanced" && <AdvancedTab controller={controller} regions={regions} updates={updates} runSetup={runSetup} />}
                     </div>
                 </section>
             </div>

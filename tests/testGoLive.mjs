@@ -22,7 +22,7 @@ const load = async path => {
 
 const { buildAllowedIps, buildHoldPacUrl, GoLive, parseTraceCountry, shouldStartAtBoot } = await load("go-live.ts");
 const { sanitizeWireGuardConfig } = await load("vpn-types.ts");
-const { fastStartAllowed, wireSockStillStopping } = await load("vpn-windows.ts");
+const { fastStartAllowed, parseScServiceState, waitServicesStopped, wireSockStillStopping } = await load("vpn-windows.ts");
 const { GatewayWatch } = await load("gateway-watch.ts");
 
 function pacDecides(url, host) {
@@ -75,15 +75,7 @@ assert.equal(shouldStartAtBoot({ enabled: false, goLive: true }), false, "A disa
 // O caminho rápido só vale quando está tudo como um fechamento limpo deixa. Saídas reais do sc.exe.
 {
     const configPath = String.raw`C:\ProgramData\GoLiveBypass\plugin-vpn\wiresock-discord.conf`;
-    const serviceConfig = String.raw`[SC] QueryServiceConfig SUCCESS
-
-SERVICE_NAME: wiresock-client-service
-        TYPE               : 10  WIN32_OWN_PROCESS
-        START_TYPE         : 3   DEMAND_START
-        ERROR_CONTROL      : 1   NORMAL
-        BINARY_PATH_NAME   : "C:\Program Files\WireSock Secure Connect\sdk\wiresock-client.exe" service -config "${configPath}" -log-level none
-        DISPLAY_NAME       : WireSock WireGuard VPN Client Service
-`;
+    const serviceConfig = JSON.stringify({ StartMode: "Manual", PathName: `"C:\\Program Files\\WireSock Secure Connect\\sdk\\wiresock-client.exe" service -config "${configPath}" -log-level none` });
     const clean = {
         configPath,
         service: { code: 0, stdout: "        STATE              : 1  STOPPED \n" },
@@ -95,7 +87,19 @@ SERVICE_NAME: wiresock-client-service
     assert.equal(fastStartAllowed({ ...clean, service: { code: 0, stdout: "STATE : 4  RUNNING" } }), false, "A running tunnel may be unfiltered");
     assert.equal(fastStartAllowed({ ...clean, service: { code: 1060, stdout: "" } }), false, "Not installed yet");
     assert.equal(fastStartAllowed({ ...clean, serviceConfig: { code: 0, stdout: serviceConfig.replace("wiresock-discord.conf", "other.conf") } }), false, "Another profile");
-    assert.equal(fastStartAllowed({ ...clean, serviceConfig: { code: 0, stdout: serviceConfig.replace("DEMAND_START", "AUTO_START") } }), false);
+    assert.equal(fastStartAllowed({ ...clean, serviceConfig: { code: 0, stdout: serviceConfig.replace("Manual", "Auto") } }), false);
+    for (const label of ["STATE", "ESTADO", "ÉTAT", "STATUS", "状態"]) {
+        const service = { code: 0, stdout: `${label} : 1 STOPPED\r\n` };
+        assert.equal(fastStartAllowed({ ...clean, service }), true, `Fast start supports ${label}`);
+        assert.equal(parseScServiceState(`${label} : 4 RUNNING\r\n`), 4);
+        assert.equal(parseScServiceState(`${label} : 3 STOP_PENDING\r\n`), 3);
+    }
+    assert.equal(parseScServiceState("TYPE : 4 WIN32_OWN_PROCESS\nSTATE : 1 RUNNING"), null);
+    assert.equal(parseScServiceState("STATE : 4 UNKNOWN"), null);
+    assert.equal(parseScServiceState("ERROR 5"), null);
+    for (const invalid of ["", "null", "{}", "[]", "broken JSON", JSON.stringify({ StartMode: "Manual", PathName: 42 })]) {
+        assert.equal(fastStartAllowed({ ...clean, serviceConfig: { code: 0, stdout: invalid } }), false);
+    }
     assert.equal(fastStartAllowed({ ...clean, serviceConfig: { code: 5, stdout: "" } }), false);
     assert.equal(fastStartAllowed({ ...clean, proService: { code: 0, stdout: "STATE : 4  RUNNING" } }), false, "An external tunnel");
     assert.equal(fastStartAllowed({ ...clean, proService: { code: 0, stdout: "STATE : 1  STOPPED" } }), true);
@@ -103,11 +107,28 @@ SERVICE_NAME: wiresock-client-service
     assert.equal(fastStartAllowed({ ...clean, processes: { code: 1, stdout: "" } }), false, "Unknown state goes the safe way");
 }
 
+{
+    let time = 0;
+    let calls = 0;
+    const options = {
+        now: () => time,
+        sleep: async ms => { time += ms; },
+        query: async () => ({ code: 0, stdout: ++calls < 5 ? "ESTADO : 3 STOP_PENDING" : "ESTADO : 1 STOPPED" }),
+    };
+    assert.equal(await waitServicesStopped(["owned-service"], options), true);
+    assert.equal(time, 1000, "Waits for a graceful service stop instead of killing its process after 500 ms");
+    assert.equal(await waitServicesStopped(["removed-service"], { ...options, query: async () => ({ code: 1060, stdout: "" }) }), true);
+    assert.equal(await waitServicesStopped(["unknown-service"], { ...options, query: async () => ({ code: 5, stdout: "" }) }), false);
+    time = 0;
+    assert.equal(await waitServicesStopped(["stuck-service"], { ...options, timeoutMs: 600, query: async () => ({ code: 0, stdout: "STATUS : 3 STOP_PENDING" }) }), false);
+    assert.equal(time, 600, "The stop grace period is bounded");
+}
+
 assert.equal(parseTraceCountry("ip=1.2.3.4\nloc=MX\n"), "MX");
 assert.equal(parseTraceCountry("<html>"), null);
 
 function harness({ hellos = [true], probes = ["MX"], hasRoute = true, startFails = false, canRotate = true, servers = ["MX-FREE#9"], fastAvailable = true } = {}) {
-    const state = { hellos: [...hellos], probes: [...probes], hasRoute, startFails, canRotate, fastAvailable, busy: false, sleeps: [], server: servers[0], running: false, order: [], starts: 0, stops: 0, avoided: [], filters: [], logs: [], proxies: [], time: 0 };
+    const state = { hellos: [...hellos], probes: [...probes], hasRoute, startFails, canRotate, fastAvailable, busy: false, sleeps: [], server: servers[0], running: false, order: [], starts: 0, stops: 0, resets: 0, avoided: [], filters: [], logs: [], proxies: [], time: 0 };
     let next = 1;
     const session = {
         async setProxy(config) {
@@ -118,6 +139,10 @@ function harness({ hellos = [true], probes = ["MX"], hasRoute = true, startFails
     const goLive = new GoLive({
         session,
         probeSession: {
+            async closeAllConnections() {
+                assert.equal(state.running, true, "Only clear probe sockets after the tunnel is running");
+                state.resets++;
+            },
             async fetch() {
                 state.order.push("probe");
                 const value = state.probes.length > 1 ? state.probes.shift() : state.probes[0];
@@ -168,6 +193,21 @@ function harness({ hellos = [true], probes = ["MX"], hasRoute = true, startFails
         sleep: async ms => { state.sleeps.push(ms); },
     });
     return { goLive, state, cleanup: () => goLive.dispose() };
+}
+
+{
+    const { goLive, state, cleanup } = harness({ probes: [...Array(7).fill("fail"), "US"] });
+    try {
+        assert.equal((await goLive.configure(true)).state, "active");
+        assert.equal(state.starts, 1, "A new route gets eight probes before being restarted or rotated");
+        assert.equal(state.avoided.length, 0);
+        assert.equal(state.resets, 1, "Reset probe connections once per tunnel start");
+        assert.ok(state.logs.some(log => log.includes("route probe failed")), "Probe failures are diagnosable");
+        await goLive.checkNow();
+        assert.equal(state.resets, 1, "Background checks keep the isolated probe session connected");
+    } finally {
+        cleanup();
+    }
 }
 
 // Abertura: o gateway só é solto depois de a rota provar que saiu do país.
@@ -340,7 +380,7 @@ function harness({ hellos = [true], probes = ["MX"], hasRoute = true, startFails
 
 // A rota morre de vez: Discord vai para a rede normal e o plugin acha outra sozinho.
 {
-    const probes = ["MX", "fail", "fail", "fail", "fail", "fail", "fail", "US"];
+    const probes = ["MX", ...Array(11).fill("fail"), "US"];
     const { goLive, state, cleanup } = harness({ probes, servers: ["MX-FREE#9", "US-FREE#1"] });
     await goLive.configure(true);
     const status = await goLive.checkNow();

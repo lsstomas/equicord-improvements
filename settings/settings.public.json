@@ -726,8 +726,6 @@
         },
         "GoLiveBypass": {
             "enabled": true,
-            "onboardingCompleted": false,
-            "onboardingSkipped": true,
             "autoUpdate": false,
             "protonFreeOnly": true,
             "protonAutoPing": true
@@ -1448,7 +1446,7 @@
             "ignoreFonts": false,
             "friendNameOnlyInDirectMessages": false,
             "customNameOnlyInDirectMessages": false,
-            "triggerNameRerender": false,
+            "triggerNameRerender": true,
             "typingIndicator": true,
             "alwaysHaveGradientsActive": false,
             "ignoreEffects": true,
@@ -1758,6 +1756,9 @@
             "disableVideo": true,
             "useServer": false,
             "serverSelf": false
+        },
+        "VoiceChannelFinder": {
+            "enabled": true
         },
         "VoiceChannelLog": {
             "enabled": true,

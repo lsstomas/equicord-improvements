@@ -23,6 +23,10 @@ export function sanitizeSettings(settings) {
         if (config && typeof config === "object") plugins[name] = keepSafeValues(config);
     }
 
+    if (plugins.GoLiveBypass) {
+        for (const key of ["goLive", "gatewayProxy", "onboardingCompleted", "onboardingSkipped"]) delete plugins.GoLiveBypass[key];
+    }
+
     return { ...keepSafeValues(settings), plugins };
 }
 

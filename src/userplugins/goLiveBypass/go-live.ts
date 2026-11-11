@@ -48,7 +48,8 @@ export interface GoLiveSession {
 }
 
 export interface GoLiveProbeSession {
-    fetch(url: string, init?: { signal?: AbortSignal; cache?: "no-store"; }): Promise<{ ok: boolean; text(): Promise<string>; }>;
+    fetch(url: string, init?: { signal?: AbortSignal; cache?: "no-store"; }): Promise<{ ok: boolean; status?: number; text(): Promise<string>; }>;
+    closeAllConnections?(): Promise<void>;
 }
 
 export interface GoLiveOptions {
@@ -68,7 +69,7 @@ const BLOCKED_COUNTRY = "BR";
 const CHECK_INTERVAL_MS = 30_000;
 const PROBE_TIMEOUT_MS = 4_000;
 const PROBE_RETRY_DELAY_MS = 1_500;
-const STARTUP_PROBES = 3;
+const STARTUP_PROBES = 8;
 // Na abertura a sonda corre contra o gateway, que tenta conectar uns 1,7 s depois do plugin abrir.
 const BOOT_PROBES = 5;
 const BOOT_PROBE_DELAY_MS = 300;
@@ -181,6 +182,7 @@ export class GoLive {
             if (!this.options.tunnel.hasRoute()) return;
             if (!await this.options.tunnel.startFast(buildAllowedIps(await this.gatewayAddresses()))) return;
             this.setState("starting");
+            await this.resetProbeConnections();
             if (!await this.probeUntilReady(BOOT_PROBES, BOOT_PROBE_DELAY_MS, BOOT_PROBE_TIMEOUT_MS)) return;
             this.enabled = true;
             this.startChecks();
@@ -266,6 +268,7 @@ export class GoLive {
             this.options.log("warn", "Go Live: o túnel não ligou", { erro: this.error });
             return false;
         }
+        await this.resetProbeConnections();
         if (!await this.probeUntilReady()) return false;
         if (!verifyGateway) return true;
         const answered = await this.gatewayHello(GATEWAY_HELLO_TIMEOUT_MS);
@@ -376,16 +379,28 @@ export class GoLive {
         this.options.log("info", "Go Live: rota recuperada", { servidor: this.options.tunnel.currentServer() });
     }
 
+    private async resetProbeConnections(): Promise<void> {
+        try {
+            await this.options.probeSession.closeAllConnections?.();
+        } catch (error) {
+            this.options.log("warn", "Go Live: could not close previous probe connections", { error: error instanceof Error ? error.message : String(error) });
+        }
+    }
+
     private async probe(timeoutMs = PROBE_TIMEOUT_MS): Promise<boolean> {
         const startedAt = this.now();
         try {
             const response = await this.options.probeSession.fetch(TRACE_URL, { signal: AbortSignal.timeout(timeoutMs), cache: "no-store" });
             const country = response.ok ? parseTraceCountry(await response.text()) : null;
-            if (country === null || country === BLOCKED_COUNTRY) return false;
+            if (country === null || country === BLOCKED_COUNTRY) {
+                this.options.log("warn", "Go Live: route probe was not accepted", { status: response.status ?? null, country, ms: this.now() - startedAt });
+                return false;
+            }
             this.country = country;
             this.latencyMs = this.now() - startedAt;
             return true;
-        } catch {
+        } catch (error) {
+            this.options.log("warn", "Go Live: route probe failed", { error: error instanceof Error ? `${error.name}: ${error.message}` : String(error), ms: this.now() - startedAt });
             return false;
         }
     }

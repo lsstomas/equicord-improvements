@@ -10,6 +10,7 @@ Built and tested against Equicord 1.15.15.0, commit `00abcbeea`.
 |---|---|---|
 | **ActivityTracker** | Rewritten from [Discord-Activity-Tracker](https://github.com/elioflex/Discord-Activity-Tracker) | Dashboard with voice, messages, reactions, status, profile history and closest contacts for the people you choose |
 | **VoiceChannelLog** | [Equicord](https://github.com/Equicord/Equicord), modified | Saved history of the calls you were in, with filters, search and export |
+| **VoiceChannelFinder** | Original | Filters the server's voice channel list by person, occupancy and join access, with highlighting and an option to hide other voice channels |
 | **ToastNotifications** | [Equicord](https://github.com/Equicord/Equicord), modified | Adds a toast when someone on your list joins a call |
 | **FakeDeafen** | [fakedeafen](https://github.com/itskonv1/fakedeafen), modified | Shows you as muted and deafened while you keep hearing |
 | **GoLiveBypass** | [GoLiveBypass](https://github.com/bezumiya/GoLiveBypass), modified | Brings back Go Live and camera in Brazil through a WireGuard tunnel for Discord's gateway and media only, with a control panel in the top bar |
@@ -57,6 +58,15 @@ GoLiveBypass runs on Windows x64 and Linux x64, and needs a ProtonVPN account or
 
 Auto-update stays off, because an update would replace the control panel.
 
+Local revision `2.0.13-improvements.1` reads Windows service state without relying on English field labels and uses CIM for the service configuration. It waits for a graceful service stop before trying to terminate remaining owned processes. New routes get up to eight startup probes, and probe failures include HTTP status, country or a network error in the local log. The dedicated probe session closes old connections after a tunnel starts.
+
+To reopen setup after **Set up later**, use **Run setup** in the plugin settings, the toolbox or the panel's **Advanced** tab.
+
+## Recent compatibility fixes
+
+- VoiceChannelFinder works alongside Dragify. Participant searches highlight the exact channel, and **Empty** with **Hide non-matching voice channels** hides occupied voice channels.
+- AudioPlayerAPI preserves Discord's native sound arguments. This fixes mute, deafen and call join/leave sounds failing with a non-finite volume error.
+
 ## Layout
 
 ```
@@ -71,7 +81,7 @@ AGENTS.md   Install guide for AI agents
 
 `ActivityTracker` depends on files in `voiceChannelLog`, and `FakeMedia` depends on `FakeDeafen`, so install them together. `install.mjs` does this for you.
 
-`src/equicordplugins` replaces two of Equicord's own plugins. If Equicord has changed them since the commit above, those changes are overwritten.
+`src/equicordplugins` replaces ToastNotifications, VoiceChannelLog and AudioPlayerAPI. If Equicord has changed these files since the commit above, those changes are overwritten.
 
 `LastOnlineTracker` has no license file, so only my change is stored here. The installer downloads the author's original and applies the patch.
 
