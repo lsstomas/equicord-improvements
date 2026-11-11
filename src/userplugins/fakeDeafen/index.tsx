@@ -4,48 +4,70 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { Logger } from "@utils/Logger";
 import definePlugin from "@utils/types";
-import { MediaEngineStore, Menu, SelectedChannelStore, showToast, VoiceActions } from "@webpack/common";
+import { MediaEngineStore, SelectedChannelStore, showToast, UserStore, VoiceActions } from "@webpack/common";
 
 import { VoiceStateService } from "./service";
+import { resetFakeModes, setFakeMode } from "./state";
 import { applyOverrides, createDefaultFlags, type FakeVoiceFlags, type VoiceStateKey, type VoiceStatePayload } from "./types";
 
 let service: VoiceStateService | null = null;
 let flags: FakeVoiceFlags = createDefaultFlags();
 let toggling = false;
+let generation = 0;
+const logger = new Logger("FakeDeafen");
+
+function resetVoiceModes() {
+    generation++;
+    toggling = false;
+    flags = createDefaultFlags();
+    resetFakeModes("mute", "deafen");
+}
 
 async function handleToggle(key: VoiceStateKey): Promise<void> {
     if (toggling) return;
     toggling = true;
+    const operation = generation;
+    const mode = key === "selfMute" ? "mute" : "deafen";
+    const channelId = SelectedChannelStore.getVoiceChannelId();
+    setFakeMode(mode, { pending: true, error: null });
     try {
         const next = { ...flags, [key]: !flags[key] };
         if (key === "selfDeaf" && next.selfDeaf) {
             if (!SelectedChannelStore.getVoiceChannelId()) {
-                showToast({ text: "Join a voice channel before enabling Fake Deafen.", variant: "critical" });
-                return;
+                throw new Error("Join a voice channel before enabling Fake Deafen.");
             }
             if (MediaEngineStore.isSelfDeaf()) {
-                showToast({ text: "Turn off Discord deafen before enabling Fake Deafen.", variant: "critical" });
-                return;
+                throw new Error("Turn off Discord deafen before enabling Fake Deafen.");
             }
             if (!MediaEngineStore.isSelfMute()) {
                 await VoiceActions.toggleSelfMute();
+                if (operation !== generation) return;
+                if (channelId !== SelectedChannelStore.getVoiceChannelId()) {
+                    throw new Error("Your voice channel changed. Try again in your current call.");
+                }
                 if (!MediaEngineStore.isSelfMute() || MediaEngineStore.isSelfDeaf()) {
-                    showToast({ text: "Could not mute your microphone. Fake Deafen was not enabled.", variant: "critical" });
-                    return;
+                    throw new Error("Could not mute your microphone. Fake Deafen was not enabled.");
                 }
             }
         }
         if (!service?.triggerUpdate(next)) {
-            showToast({ text: "FakeDeafen could not update your voice state. Join a voice channel and try again.", variant: "critical" });
-            return;
+            throw new Error("Could not update your voice state. Join a voice channel and try again.");
         }
         flags = next;
+        setFakeMode(mode, { active: next[key] });
     } catch (error) {
-        console.error("[FakeDeafen] Could not change voice state:", error);
-        showToast({ text: "Could not change voice state. Check your microphone and try again.", variant: "critical" });
+        logger.error("Could not change voice state", error);
+        if (operation !== generation) return;
+        const text = error instanceof Error ? error.message : "Could not change voice state. Try again.";
+        setFakeMode(mode, { error: text });
+        showToast({ text, variant: "critical" });
     } finally {
-        toggling = false;
+        if (operation === generation) {
+            toggling = false;
+            setFakeMode(mode, { pending: false });
+        }
     }
 }
 
@@ -55,33 +77,8 @@ export default definePlugin({
     authors: [{ id: 1128391811136770128n, name: "@kon" }],
     tags: ["Voice", "Privacy"],
 
-    contextMenus: {
-        "audio-device-context"(children, data) {
-            if (data?.renderInputDevices) {
-                children.push(
-                    <Menu.MenuSeparator />,
-                    <Menu.MenuCheckboxItem
-                        id="fake-mute"
-                        label="Fake Mute"
-                        checked={flags.selfMute}
-                        action={() => handleToggle("selfMute")}
-                    />
-                );
-            }
-
-            if (data?.renderOutputDevices) {
-                children.push(
-                    <Menu.MenuSeparator />,
-                    <Menu.MenuCheckboxItem
-                        id="fake-deafen"
-                        label="Fake Deafen"
-                        checked={flags.selfDeaf}
-                        action={() => handleToggle("selfDeaf")}
-                    />
-                );
-            }
-        }
-    },
+    toggleMute: () => handleToggle("selfMute"),
+    toggleDeafen: () => handleToggle("selfDeaf"),
 
     modifyVoiceState(voiceState: VoiceStatePayload): VoiceStatePayload {
         return applyOverrides(voiceState, flags);
@@ -99,16 +96,24 @@ export default definePlugin({
         }
     ],
 
+    flux: {
+        CONNECTION_CLOSED: resetVoiceModes,
+        VOICE_STATE_UPDATES({ voiceStates }: { voiceStates: { userId: string; channelId: string | null; }[]; }) {
+            const userId = UserStore.getCurrentUser()?.id;
+            if (voiceStates.some(state => state.userId === userId && !state.channelId)) resetVoiceModes();
+        }
+    },
+
     start() {
-        flags = createDefaultFlags();
+        resetVoiceModes();
         service = new VoiceStateService();
     },
 
     stop() {
+        resetVoiceModes();
         if (service) {
             service.triggerUpdate(createDefaultFlags());
             service = null;
         }
-        flags = createDefaultFlags();
     }
 });

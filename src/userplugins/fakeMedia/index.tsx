@@ -9,10 +9,11 @@ import { Logger } from "@utils/Logger";
 import definePlugin from "@utils/types";
 import { VoiceState } from "@vencord/discord-types";
 import { findByPropsLazy, findStoreLazy } from "@webpack";
-import { ApplicationStreamingStore, ChannelStore, MediaEngineStore, Menu, PermissionsBits, PermissionStore, SelectedChannelStore, showToast, UserStore } from "@webpack/common";
+import { ApplicationStreamingStore, ChannelStore, MediaEngineStore, PermissionsBits, PermissionStore, SelectedChannelStore, showToast, UserStore } from "@webpack/common";
 
 import FakeDeafen from "../fakeDeafen";
 import { VoiceStateService } from "../fakeDeafen/service";
+import { resetFakeModes, setFakeMode } from "../fakeDeafen/state";
 import { VoiceStatePayload } from "../fakeDeafen/types";
 
 const logger = new Logger("FakeMedia");
@@ -34,6 +35,7 @@ function resetStream() {
     clearTimeout(confirmationTimer);
     confirmationTimer = undefined;
     fakeStream = null;
+    resetFakeModes("screen");
 }
 
 function stopFakeStream() {
@@ -66,6 +68,7 @@ function sendCameraState() {
 
 function toggleCamera() {
     const previous = cameraChannel;
+    setFakeMode("camera", { pending: true, error: null });
     try {
         const channelId = SelectedChannelStore.getVoiceChannelId();
         if (!channelId) throw new Error("Join a voice channel before using Fake Camera.");
@@ -74,16 +77,22 @@ function toggleCamera() {
         }
         cameraChannel = cameraChannel ? null : channelId;
         sendCameraState();
+        setFakeMode("camera", { active: cameraChannel !== null });
         notify(cameraChannel ? "Fake Camera requested. Your real camera stays off." : "Fake Camera disabled.");
     } catch (error) {
         cameraChannel = previous;
         logger.error("Could not update camera state", error);
-        notify(error instanceof Error ? error.message : "Could not update camera state.", true);
+        const text = error instanceof Error ? error.message : "Could not update camera state.";
+        setFakeMode("camera", { error: text });
+        notify(text, true);
+    } finally {
+        setFakeMode("camera", { pending: false });
     }
 }
 
 function toggleScreenShare() {
     let starting = false;
+    setFakeMode("screen", { error: null });
     try {
         if (fakeStream) {
             stopFakeStream();
@@ -109,6 +118,7 @@ function toggleScreenShare() {
             : `call:${channelId}:${user.id}`;
         starting = true;
         fakeStream = { key, channelId };
+        setFakeMode("screen", { pending: true, active: false });
         socket.send(18, {
             type: channel.guild_id ? "guild" : "call",
             guild_id: channel.guild_id ?? null,
@@ -122,24 +132,18 @@ function toggleScreenShare() {
                 logger.error("Could not cancel unconfirmed stream", error);
                 resetStream();
             }
-            notify("Discord did not confirm Fake Screen Share. The request was cancelled.", true);
+            const text = "Discord did not confirm Fake Screen Share. The request was cancelled.";
+            setFakeMode("screen", { error: text });
+            notify(text, true);
         }, 15000);
         notify("Fake Screen Share requested. Waiting for Discord.");
     } catch (error) {
         logger.error("Could not update stream state", error);
         if (starting) resetStream();
-        notify(error instanceof Error ? error.message : "Could not update stream state.", true);
+        const text = error instanceof Error ? error.message : "Could not update stream state.";
+        setFakeMode("screen", { error: text });
+        notify(text, true);
     }
-}
-
-function addMenu(children) {
-    children.push(
-        <Menu.MenuSeparator />,
-        <Menu.MenuItem id="fake-media" label="Fake Media">
-            <Menu.MenuCheckboxItem id="fake-camera" label="Fake Camera" checked={cameraChannel !== null} action={toggleCamera} />
-            <Menu.MenuCheckboxItem id="fake-screen-share" label="Fake Screen Share" checked={fakeStream !== null} action={toggleScreenShare} />
-        </Menu.MenuItem>
-    );
 }
 
 export default definePlugin({
@@ -150,16 +154,11 @@ export default definePlugin({
     enabledByDefault: true,
     dependencies: ["FakeDeafen"],
     settingsAboutComponent: () => <Paragraph>
-        Use Fake Media in the camera menu. Camera and screen loading indicators depend on the other client's behavior.
+        Use the mask button in your voice panel or call controls. Camera and screen loading indicators depend on the other client's behavior.
         Discord may end the stream or show an error. Disable fake modes before using real video or sharing.
     </Paragraph>,
-    contextMenus: {
-        "video-device-context": addMenu,
-        "stream-context": addMenu,
-        "audio-device-context"(children, data) {
-            if (data?.renderOutputDevices) addMenu(children);
-        }
-    },
+    toggleCamera,
+    toggleScreenShare,
     toolboxActions: {
         "Toggle Fake Camera": toggleCamera,
         "Toggle Fake Screen Share": toggleScreenShare
@@ -202,11 +201,13 @@ export default definePlugin({
             if (streamKey !== fakeStream?.key) return;
             clearTimeout(confirmationTimer);
             confirmationTimer = undefined;
+            setFakeMode("screen", { active: true, pending: false, error: null });
             notify("Fake Screen Share confirmed by Discord. No screen is captured.");
         },
         STREAM_DELETE({ streamKey }: { streamKey: string; }) {
             if (streamKey !== fakeStream?.key) return;
             resetStream();
+            setFakeMode("screen", { error: "Discord ended Fake Screen Share." });
             notify("Discord ended Fake Screen Share.", true);
         },
         STREAM_START() {
@@ -216,16 +217,27 @@ export default definePlugin({
             const userId = UserStore.getCurrentUser()?.id;
             const state = voiceStates.find(s => s.userId === userId);
             if (!state) return;
-            if (cameraChannel && state.channelId !== cameraChannel) cameraChannel = null;
-            if (fakeStream && state.channelId !== fakeStream.channelId) stopFakeStream();
+            if (cameraChannel && state.channelId !== cameraChannel) {
+                cameraChannel = null;
+                resetFakeModes("camera");
+            }
+            if (fakeStream && state.channelId !== fakeStream.channelId) {
+                try {
+                    stopFakeStream();
+                } finally {
+                    resetStream();
+                }
+            }
         },
         CONNECTION_CLOSED() {
             cameraChannel = null;
+            resetFakeModes("camera");
             resetStream();
         }
     },
     start() {
         cameraChannel = null;
+        resetFakeModes("camera");
         resetStream();
         VoiceStateService.cameraOverride = channelId => cameraChannel === channelId;
     },
@@ -245,6 +257,7 @@ export default definePlugin({
         } finally {
             VoiceStateService.cameraOverride = undefined;
             cameraChannel = null;
+            resetFakeModes("camera");
             resetStream();
         }
     }

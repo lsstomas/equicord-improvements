@@ -15,6 +15,7 @@ The manual plugin bundle was originally built against Equicord 1.15.15.0, commit
 | **FakeDeafen** | [fakedeafen](https://github.com/itskonv1/fakedeafen), modified | Shows you as muted and deafened while you keep hearing |
 | **GoLiveBypass** | [GoLiveBypass](https://github.com/bezumiya/GoLiveBypass), modified | Brings back Go Live and camera in Brazil through a WireGuard tunnel for Discord's gateway and media only, with a control panel in the top bar |
 | **FakeMedia** | Original | Shows a camera or screen share without sending anything |
+| **FakeControls** | Original | One mask button in the voice panel and call controls for Fake Mute, Fake Deafen, Fake Camera and Fake Screen Share, with live indicators |
 | **VoiceFakeDetector** | [Endcord](https://github.com/Endcord/Endcord), adapted | Marks people shown as muted who are still sending audio |
 | **ClientModDetector** | Original | Marks people who left visible traces of a modified client |
 | **LastMessageDate** | Original | Finds someone's last message in a server, only when you click |
@@ -31,7 +32,7 @@ Invoke-WebRequest https://raw.githubusercontent.com/lsstomas/equicord-improvemen
 powershell -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
-Setup installs missing Node.js LTS and Git through Windows Package Manager, downloads the latest Equicord source, installs the pnpm version required by that source, applies this bundle, checks types, runs the six regression suites, and builds the client. Windows may request administrator permission when installing prerequisites.
+Setup installs missing Node.js LTS and Git through Windows Package Manager, downloads the latest Equicord source, installs the pnpm version required by that source, applies this bundle, checks types, runs the seven regression suites, and builds the client. Windows may request administrator permission when installing prerequisites.
 
 It detects Discord Stable, Canary and PTB, including Equicord installed with the `.exe` and existing source builds. If several channels are installed, the automatic choice is Stable, then Canary, then PTB. Use `-Channel` to choose another one.
 
@@ -109,7 +110,9 @@ setup.mjs   Installation detection, build checks, backup and injection
 AGENTS.md   Install guide for AI agents
 ```
 
-`ActivityTracker` depends on files in `voiceChannelLog`, and `FakeMedia` depends on `FakeDeafen`, so install them together. `install.mjs` does this for you.
+`ActivityTracker` depends on files in `voiceChannelLog`. `FakeControls` depends on `FakeMedia` and `FakeDeafen`, so install them together. `install.mjs` does this for you.
+
+Fake modes are controlled from the mask button next to the camera, screen share and activity buttons in the voice panel, or next to the camera inside a call. The button turns purple when a mode is active, and the FAKE strip keeps the active modes visible after closing the popout. Screen share shows Pending until Discord confirms it, and can be cancelled while waiting. Fake Deafen first mutes the real microphone; you can then control it normally. The old microphone, deafen and camera menu entries have been removed.
 
 `src/equicordplugins` replaces ToastNotifications, VoiceChannelLog and AudioPlayerAPI. If Equicord has changed these files since the commit above, those changes are overwritten.
 

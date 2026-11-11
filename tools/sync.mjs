@@ -16,9 +16,9 @@ const SOURCE = resolve(process.env.EQUICORD_SOURCE ?? join(ROOT, "..", "source")
 const SETTINGS = process.env.EQUICORD_SETTINGS ?? join(process.env.APPDATA ?? "", "Equicord", "settings", "settings.json");
 const LOGS = join(homedir(), "Documents", "Equicord Logs");
 
-const USER_PLUGINS = ["activityTracker", "clientModDetector", "fakeDeafen", "fakeMedia", "goLiveBypass", "lastMessageDate", "voiceChannelFinder", "voiceFakeDetector"];
+const USER_PLUGINS = ["activityTracker", "clientModDetector", "fakeControls", "fakeDeafen", "fakeMedia", "goLiveBypass", "lastMessageDate", "voiceChannelFinder", "voiceFakeDetector"];
 const EDITED_PLUGINS = ["toastNotifications", "voiceChannelLog"];
-const TESTS = ["benchVoiceChannelLog.mjs", "testActivityTracker.mjs", "testDiscordCompatibility.mjs", "testGoLive.mjs", "testToastVoiceTracking.mjs", "testUserplugins.mjs", "testVoiceChannelHistory.mjs"];
+const TESTS = ["benchVoiceChannelLog.mjs", "testActivityTracker.mjs", "testDiscordCompatibility.mjs", "testFakeControls.mjs", "testGoLive.mjs", "testToastVoiceTracking.mjs", "testUserplugins.mjs", "testVoiceChannelHistory.mjs"];
 
 const LAST_ONLINE_COMMIT = "493727b2b3d048dd28fe2cab5921117621ac8b92";
 const LAST_ONLINE_URL = `https://raw.githubusercontent.com/k1ng0p/LastOnlineTracker/${LAST_ONLINE_COMMIT}/index.tsx`;
@@ -62,6 +62,7 @@ writeFileSync(join(ROOT, "patches/lastOnlineTracker.patch"), patch);
 const settingsText = readFileSync(SETTINGS, "utf8");
 mkdirSync(join(ROOT, "settings"), { recursive: true });
 const publicSettings = sanitizeSettings(JSON.parse(settingsText));
+publicSettings.plugins.FakeControls ??= { enabled: true };
 writeFileSync(join(ROOT, "settings/settings.public.json"), `${JSON.stringify(publicSettings, null, 4)}\n`);
 
 const names = [];

@@ -1870,6 +1870,9 @@
         },
         "ZipPreview": {
             "enabled": false
+        },
+        "FakeControls": {
+            "enabled": true
         }
     }
 }

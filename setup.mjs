@@ -7,8 +7,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REPOSITORY = dirname(fileURLToPath(import.meta.url));
 const BRANCHES = { stable: "Discord", canary: "DiscordCanary", ptb: "DiscordPTB" };
-const PLUGINS = ["ActivityTracker", "AudioPlayerAPI", "ClientModDetector", "FakeDeafen", "FakeMedia", "GoLiveBypass", "LastMessageDate", "LastOnlineTracker", "ToastNotifications", "VoiceChannelFinder", "VoiceChannelLog", "VoiceFakeDetector"];
-const TESTS = ["testVoiceChannelHistory.mjs", "testUserplugins.mjs", "testActivityTracker.mjs", "testToastVoiceTracking.mjs", "testGoLive.mjs", "testDiscordCompatibility.mjs"];
+const PLUGINS = ["ActivityTracker", "AudioPlayerAPI", "ClientModDetector", "FakeControls", "FakeDeafen", "FakeMedia", "GoLiveBypass", "LastMessageDate", "LastOnlineTracker", "ToastNotifications", "VoiceChannelFinder", "VoiceChannelLog", "VoiceFakeDetector"];
+const TESTS = ["testVoiceChannelHistory.mjs", "testUserplugins.mjs", "testActivityTracker.mjs", "testToastVoiceTracking.mjs", "testGoLive.mjs", "testDiscordCompatibility.mjs", "testFakeControls.mjs"];
 
 function run(command, args, cwd, capture = false, extraEnv = {}) {
     const result = spawnSync(command, args, {
