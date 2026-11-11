@@ -2,6 +2,14 @@
 
 Instructions for an AI agent installing these plugins for a user.
 
+## Automated Windows setup
+
+- Prefer `powershell -ExecutionPolicy Bypass -File setup.ps1` for a new Windows install. The script installs missing prerequisites, detects packaged and source installations of Equicord, builds current official Equicord and injects it with the official installer.
+- Use `-DetectOnly` to inspect the installation or `-PrepareOnly` to validate a full build without applying it. `-Channel stable|canary|ptb` selects a Discord channel; `-DiscordPath` supports a custom install location.
+- The normal setup prompts before closing Discord. `-Yes` skips that prompt for an installation already authorized by the user, including closing the selected Discord client.
+- Retain the managed build in `%LOCALAPPDATA%\EquicordImprovements`, because the injected loader depends on it. Backups and the active build path are stored there.
+- Run `node tools/setup.test.mjs` when editing the setup. Do not test injection against a real Discord install when the task only asks to edit or review the installer.
+
 ## Before you start
 
 - Requires Node.js 22 or newer, pnpm and Git. Equicord's `package.json` sets the pnpm version, and `corepack pnpm` picks it up.

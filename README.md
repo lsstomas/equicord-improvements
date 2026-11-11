@@ -2,7 +2,7 @@
 
 My custom plugins and settings for [Equicord](https://github.com/Equicord/Equicord), ready to drop into any Equicord source.
 
-Built and tested against Equicord 1.15.15.0, commit `00abcbeea`.
+The manual plugin bundle was originally built against Equicord 1.15.15.0, commit `00abcbeea`. Full Windows preparation also passed on Equicord 1.15.17.2, commit `32b337cd`. The Windows setup downloads the current official `main` and checks compatibility before applying it.
 
 ## Plugins
 
@@ -21,6 +21,34 @@ Built and tested against Equicord 1.15.15.0, commit `00abcbeea`.
 | **LastOnlineTracker** | [LastOnlineTracker](https://github.com/k1ng0p/LastOnlineTracker), modified | Shows when someone went offline, including on their profile |
 
 ## Install
+
+### Automatic Windows setup
+
+Download [setup.ps1](https://raw.githubusercontent.com/lsstomas/equicord-improvements/main/setup.ps1) and run it with PowerShell, or use these commands in the folder where you want to download the script:
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/lsstomas/equicord-improvements/main/setup.ps1 -OutFile setup.ps1
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+```
+
+Setup installs missing Node.js LTS and Git through Windows Package Manager, downloads the latest Equicord source, installs the pnpm version required by that source, applies this bundle, checks types, runs the six regression suites, and builds the client. Windows may request administrator permission when installing prerequisites.
+
+It detects Discord Stable, Canary and PTB, including Equicord installed with the `.exe` and existing source builds. If several channels are installed, the automatic choice is Stable, then Canary, then PTB. Use `-Channel` to choose another one.
+
+Before applying the build, setup asks to close the selected Discord client. This disconnects an active call. It saves a local backup of the previous loader and Equicord settings, uses the official installer to inject the new build, verifies the loader, enables this bundle's plugins, and opens Discord. The existing Equicord data folder is reused, including themes, plugin data and personal settings. Existing plugin options are preserved. A failed injection restores the previous loader.
+
+Builds and backups stay in `%LOCALAPPDATA%\EquicordImprovements`. Keep the active build folder there, because Discord loads it directly. Equicord's automatic updater is disabled for this customized build; rerun setup to download and validate a newer version. If an upstream change breaks a check or build, setup stops before applying it to Discord. The Proton account and route are configured inside GoLiveBypass.
+
+```powershell
+.\setup.ps1 -DetectOnly
+.\setup.ps1 -Channel canary
+.\setup.ps1 -DiscordPath 'D:\Apps\Discord'
+.\setup.ps1 -PrepareOnly -InstallDirectory 'D:\EquicordImprovements'
+```
+
+`-DetectOnly` reports the existing installation. `-PrepareOnly` downloads, builds and validates the new version without changing Discord or its settings. `-NoLaunch` leaves Discord closed after installation. `-Yes` skips the final closure prompt for unattended installation.
+
+### Manual installation
 
 You need an [Equicord source install](https://github.com/Equicord/Equicord), Node.js, pnpm and Git.
 
@@ -76,6 +104,8 @@ settings/   My plugin options, without personal data
 tests/      Tests, which run from Equicord's scripts folder
 tools/      Maintainer tools for syncing and privacy checks
 install.mjs Installs everything into an Equicord source
+setup.ps1   Windows setup, including missing prerequisites
+setup.mjs   Installation detection, build checks, backup and injection
 AGENTS.md   Install guide for AI agents
 ```
 
@@ -99,6 +129,8 @@ git config core.hooksPath .githooks
 ```
 
 `sync.mjs` copies plugins from `../source` and stops if it finds anything personal. The hook repeats that check before every push.
+
+Run `node tools/setup.test.mjs` for setup detection, settings and recovery tests. End-to-end preparation can be checked with `setup.ps1 -PrepareOnly`.
 
 ## Disclaimer
 
