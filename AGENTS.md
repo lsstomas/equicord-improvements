@@ -34,7 +34,7 @@ Instructions for an AI agent installing these plugins for a user.
 - VoiceChannelFinder highlights matching channels in the server's sidebar. Empty with Hide non-matching voice channels removes occupied voice channels.
 - After a complete restart, Discord's mute, deafen and call join/leave sound effects play normally.
 - On Windows, GoLiveBypass recognizes the WireSock service on localized systems. Run setup is available after Set up later, including in the panel's Advanced tab.
-- FakeControls adds a mask button to the connected voice panel and beside the camera inside a call. Both buttons share the same modes and active indicators. Stream requests remain Pending until confirmed by Discord.
+- FakeControls adds one button beside the camera inside a call, built from Discord's own call button, menu and icons. Stream requests stay waiting until confirmed by Discord.
 
 ## If something fails
 

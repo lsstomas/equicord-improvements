@@ -9,11 +9,11 @@ import { Logger } from "@utils/Logger";
 import definePlugin from "@utils/types";
 import { VoiceState } from "@vencord/discord-types";
 import { findByPropsLazy, findStoreLazy } from "@webpack";
-import { ApplicationStreamingStore, ChannelStore, MediaEngineStore, PermissionsBits, PermissionStore, SelectedChannelStore, showToast, UserStore } from "@webpack/common";
+import { ApplicationStreamingStore, ChannelStore, MediaEngineStore, PermissionsBits, PermissionStore, SelectedChannelStore, UserStore } from "@webpack/common";
 
 import FakeDeafen from "../fakeDeafen";
 import { VoiceStateService } from "../fakeDeafen/service";
-import { resetFakeModes, setFakeMode } from "../fakeDeafen/state";
+import { type FakeMode, resetFakeModes, setFakeMode } from "../fakeDeafen/state";
 import { VoiceStatePayload } from "../fakeDeafen/types";
 
 const logger = new Logger("FakeMedia");
@@ -27,8 +27,10 @@ let rtcGuardReady = false;
 let fakeStream: { key: string; channelId: string; } | null = null;
 let confirmationTimer: ReturnType<typeof setTimeout> | undefined;
 
-function notify(text: string, failure = false) {
-    showToast({ text, variant: failure ? "critical" : "success" });
+// O retorno fica no painel da máscara: o toast do Discord mudou e chamá-lo quebrava a ação no meio.
+function fail(mode: FakeMode, error: unknown, fallback: string) {
+    logger.error(fallback, error);
+    setFakeMode(mode, { error: error instanceof Error ? error.message : fallback });
 }
 
 function resetStream() {
@@ -68,7 +70,7 @@ function sendCameraState() {
 
 function toggleCamera() {
     const previous = cameraChannel;
-    setFakeMode("camera", { pending: true, error: null });
+    setFakeMode("camera", { error: null });
     try {
         const channelId = SelectedChannelStore.getVoiceChannelId();
         if (!channelId) throw new Error("Join a voice channel before using Fake Camera.");
@@ -77,17 +79,13 @@ function toggleCamera() {
         }
         cameraChannel = cameraChannel ? null : channelId;
         sendCameraState();
-        setFakeMode("camera", { active: cameraChannel !== null });
-        notify(cameraChannel ? "Fake Camera requested. Your real camera stays off." : "Fake Camera disabled.");
     } catch (error) {
         cameraChannel = previous;
-        logger.error("Could not update camera state", error);
-        const text = error instanceof Error ? error.message : "Could not update camera state.";
-        setFakeMode("camera", { error: text });
-        notify(text, true);
-    } finally {
-        setFakeMode("camera", { pending: false });
+        fail("camera", error, "Could not update camera state.");
+        return;
     }
+    // Depois do envio nada pode desfazer o estado: o Discord já mostra a câmera como está aqui.
+    setFakeMode("camera", { active: cameraChannel !== null });
 }
 
 function toggleScreenShare() {
@@ -96,7 +94,6 @@ function toggleScreenShare() {
     try {
         if (fakeStream) {
             stopFakeStream();
-            notify("Fake Screen Share disabled.");
             return;
         }
         const channelId = SelectedChannelStore.getVoiceChannelId();
@@ -132,17 +129,11 @@ function toggleScreenShare() {
                 logger.error("Could not cancel unconfirmed stream", error);
                 resetStream();
             }
-            const text = "Discord did not confirm Fake Screen Share. The request was cancelled.";
-            setFakeMode("screen", { error: text });
-            notify(text, true);
+            setFakeMode("screen", { error: "Discord did not confirm Fake Screen Share. The request was cancelled." });
         }, 15000);
-        notify("Fake Screen Share requested. Waiting for Discord.");
     } catch (error) {
-        logger.error("Could not update stream state", error);
         if (starting) resetStream();
-        const text = error instanceof Error ? error.message : "Could not update stream state.";
-        setFakeMode("screen", { error: text });
-        notify(text, true);
+        fail("screen", error, "Could not update stream state.");
     }
 }
 
@@ -154,7 +145,7 @@ export default definePlugin({
     enabledByDefault: true,
     dependencies: ["FakeDeafen"],
     settingsAboutComponent: () => <Paragraph>
-        Use the mask button in your voice panel or call controls. Camera and screen loading indicators depend on the other client's behavior.
+        Use the mask button next to your camera inside a call. Camera and screen loading indicators depend on the other client's behavior.
         Discord may end the stream or show an error. Disable fake modes before using real video or sharing.
     </Paragraph>,
     toggleCamera,
@@ -202,13 +193,11 @@ export default definePlugin({
             clearTimeout(confirmationTimer);
             confirmationTimer = undefined;
             setFakeMode("screen", { active: true, pending: false, error: null });
-            notify("Fake Screen Share confirmed by Discord. No screen is captured.");
         },
         STREAM_DELETE({ streamKey }: { streamKey: string; }) {
             if (streamKey !== fakeStream?.key) return;
             resetStream();
             setFakeMode("screen", { error: "Discord ended Fake Screen Share." });
-            notify("Discord ended Fake Screen Share.", true);
         },
         STREAM_START() {
             resetStream();

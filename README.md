@@ -15,7 +15,7 @@ The manual plugin bundle was originally built against Equicord 1.15.15.0, commit
 | **FakeDeafen** | [fakedeafen](https://github.com/itskonv1/fakedeafen), modified | Shows you as muted and deafened while you keep hearing |
 | **GoLiveBypass** | [GoLiveBypass](https://github.com/bezumiya/GoLiveBypass), modified | Brings back Go Live and camera in Brazil through a WireGuard tunnel for Discord's gateway and media only, with a control panel in the top bar |
 | **FakeMedia** | Original | Shows a camera or screen share without sending anything |
-| **FakeControls** | Original | One mask button in the voice panel and call controls for Fake Mute, Fake Deafen, Fake Camera and Fake Screen Share, with live indicators |
+| **FakeControls** | Original | One button next to the camera inside a call for Fake Mute, Fake Deafen, Fake Camera and Fake Screen Share, using Discord's own button, menu and icons |
 | **VoiceFakeDetector** | [Endcord](https://github.com/Endcord/Endcord), adapted | Marks people shown as muted who are still sending audio |
 | **ClientModDetector** | Original | Marks people who left visible traces of a modified client |
 | **LastMessageDate** | Original | Finds someone's last message in a server, only when you click |
@@ -112,7 +112,7 @@ AGENTS.md   Install guide for AI agents
 
 `ActivityTracker` depends on files in `voiceChannelLog`. `FakeControls` depends on `FakeMedia` and `FakeDeafen`, so install them together. `install.mjs` does this for you.
 
-Fake modes are controlled from the mask button next to the camera, screen share and activity buttons in the voice panel, or next to the camera inside a call. The button turns purple when a mode is active, and the FAKE strip keeps the active modes visible after closing the popout. Screen share shows Pending until Discord confirms it, and can be cancelled while waiting. Fake Deafen first mutes the real microphone; you can then control it normally. The old microphone, deafen and camera menu entries have been removed.
+Fake modes are controlled from the eye button next to the camera inside a call. It opens a Discord menu with a checkbox and an icon for each mode, and the button stays highlighted while any mode is on. Errors show under the mode in the menu. Screen share shows "Waiting for Discord" until Discord confirms it, and can be cancelled while waiting. Fake Deafen first mutes the real microphone; you can then control it normally. The old microphone, deafen and camera menu entries have been removed.
 
 `src/equicordplugins` replaces ToastNotifications, VoiceChannelLog and AudioPlayerAPI. If Equicord has changed these files since the commit above, those changes are overwritten.
 

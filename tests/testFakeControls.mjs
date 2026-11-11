@@ -33,7 +33,7 @@ const common = {
     UserStore: { getCurrentUser: () => ({ id: "self" }) },
     ApplicationStreamingStore: { getCurrentUserActiveStream: () => realStream },
     PermissionStore: { can: () => true }, PermissionsBits: { STREAM: 1n },
-    VoiceActions: { toggleSelfMute: () => muteAction() }, showToast() {},
+    VoiceActions: { toggleSelfMute: () => muteAction() },
     zustandCreate: init => {
         let state = init();
         return Object.assign(selector => selector(state), {
@@ -118,6 +118,7 @@ assert.equal(video, true);
 video = false;
 media.toggleCamera();
 assert.equal(state("camera").active, true);
+assert.equal(media.modifyCameraState({ channelId: selected, selfVideo: false }).selfVideo, true, "A sent camera change stays applied");
 assert.equal(video, false, "Fake Camera does not start video capture");
 assert.equal(sent.at(-1).data.self_video, true);
 failSend = true;
@@ -172,8 +173,8 @@ const source = ts.createSourceFile(filename, readFileSync(filename, "utf8"), ts.
 const definition = source.statements.find(ts.isExportAssignment).expression.arguments[0];
 const patches = vm.runInNewContext(definition.properties.find(p => p.name?.getText(source) === "patches").initializer.getText(source));
 const canonical = regex => new RegExp(regex.source.replaceAll(String.raw`\i`, String.raw`(?:[A-Za-z_$][\w$]*)`), regex.flags);
+assert.equal(patches.length, 1, "The mask lives only in the call controls");
 const fixtures = [
-    'function panel(){return(0,v.jsxs)("div",{className:m8.uu,children:[(0,v.jsx)(TX,{channel:t,enableActivities:c,disabled:!r&&i}),(0,v.jsx)(Tq,{channel:t,canGoLive:n}),c&&(0,v.jsx)(Tz,{channel:t}),d?(0,v.jsx)(m4,{channel:t,focusProps:TW}):null]})}',
     'function camera(e){return(0,i.jsx)(I,{children:e=>{let{isActive:o,...c}=e;return(0,i.jsx)(g,{...c,...T,color:o?"green":T.color,className:s()(u),onPopoutClick:m,isTrayButton:!n})}})}'
 ];
 for (const [index, patch] of patches.entries()) {

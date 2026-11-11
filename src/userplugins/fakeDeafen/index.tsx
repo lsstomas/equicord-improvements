@@ -6,7 +6,7 @@
 
 import { Logger } from "@utils/Logger";
 import definePlugin from "@utils/types";
-import { MediaEngineStore, SelectedChannelStore, showToast, UserStore, VoiceActions } from "@webpack/common";
+import { MediaEngineStore, SelectedChannelStore, UserStore, VoiceActions } from "@webpack/common";
 
 import { VoiceStateService } from "./service";
 import { resetFakeModes, setFakeMode } from "./state";
@@ -62,7 +62,6 @@ async function handleToggle(key: VoiceStateKey): Promise<void> {
         if (operation !== generation) return;
         const text = error instanceof Error ? error.message : "Could not change voice state. Try again.";
         setFakeMode(mode, { error: text });
-        showToast({ text, variant: "critical" });
     } finally {
         if (operation === generation) {
             toggling = false;
