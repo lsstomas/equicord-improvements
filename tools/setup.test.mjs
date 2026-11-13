@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { backupInstallation, detectDiscords, inspectDiscord, mergeSetupSettings, readLoaderTarget, restoreLoader, verifyInjection } from "../setup.mjs";
+import { backupInstallation, describeInjection, detectDiscords, inspectDiscord, mergeSetupSettings, readLoaderTarget, restoreLoader, verifyInjection } from "../setup.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "equicord-setup-test-"));
 const local = join(root, "Local");
@@ -46,6 +46,10 @@ try {
     assert.equal(readLoaderTarget(join(resources, "app.asar")), exePackage);
     assert.equal(inspectDiscord(join(root, "missing")), null);
     assert.equal(verifyInjection(resources, resolve(sourceBuild, "../..")), false);
+    const description = describeInjection(discordRoot, resources, resolve(sourceBuild, "../.."));
+    assert.match(description, /Loader found: .*equicord\.asar/i, "A failed check names the loader it found");
+    assert.ok(description.includes(`Loader expected: ${resolve(sourceBuild, "../..", "dist/desktop")}`), "A failed check names the loader it expected");
+    assert.match(description, /Discord versions in .*app-\d[^(]*\(app\.asar yes, _app\.asar yes\)/, "A failed check lists each Discord version");
 
     const backup = backupInstallation(detected[0], settingsDirectory, join(root, "backups"));
     assert.equal(readFileSync(join(backup, "settings/quickCss.css"), "utf8"), "body { color: red; }");

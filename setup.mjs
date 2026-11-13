@@ -130,6 +130,25 @@ export function verifyInjection(resources, build) {
         && existsSync(join(resources, "_app.asar"));
 }
 
+// Explains a failed verifyInjection. Call it before restoring the loader, while the installer's result is still on disk.
+export function describeInjection(root, resources, build) {
+    const expected = resolve(build, "dist/desktop");
+    const state = dir => `app.asar ${existsSync(join(dir, "app.asar")) ? "yes" : "no"}, _app.asar ${existsSync(join(dir, "_app.asar")) ? "yes" : "no"}`;
+    const lines = [
+        `Checked Discord folder: ${resources}`,
+        `Loader found: ${readLoaderTarget(join(resources, "app.asar")) ?? "none (the app.asar there is not an Equicord loader)"}`,
+        `Loader expected: ${expected} or ${join(expected, "patcher.js")}`,
+        `Files in the checked folder: ${state(resources)}`,
+    ];
+    if (existsSync(root)) {
+        const versions = readdirSync(root, { withFileTypes: true })
+            .filter(entry => entry.isDirectory() && /^app-\d/.test(entry.name))
+            .map(entry => `${entry.name} (${state(join(root, entry.name, "resources"))})`);
+        lines.push(`Discord versions in ${root}: ${versions.join("; ") || "none"}`);
+    }
+    return lines.join("\n");
+}
+
 function npmCli() {
     const filename = join(dirname(process.execPath), "node_modules/npm/bin/npm-cli.js");
     if (!existsSync(filename)) throw new Error("npm was not found beside Node.js. Reinstall Node.js LTS and rerun setup.ps1.");
@@ -253,7 +272,9 @@ export async function main(args = process.argv.slice(2)) {
         console.log(`Backup saved in ${backup}`);
         try {
             run(process.execPath, [join(build, "scripts/runInstaller.mjs"), "--", "--install", "--location", selected.root], build);
-            if (!verifyInjection(selected.resources, build)) throw new Error("The official installer did not confirm the expected injection.");
+            if (!verifyInjection(selected.resources, build)) {
+                throw new Error(`The official installer did not confirm the expected injection.\n${describeInjection(selected.root, selected.resources, build)}`);
+            }
             writeSettings(settingsFile, mergeSetupSettings(current, saved));
         } catch (error) {
             restoreLoader(selected.resources, backup);
